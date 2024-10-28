@@ -224,9 +224,13 @@ __attribute__((always_inline)) inline void transpose8x1(unsigned char *A,
 const uint32_t minimum_delay_between_frames_us = 350;
 
 template <uint16_t max_strips, uint16_t bytes_per_pixel>
-class S3ClocklessDriver {
+class S3ClocklessShiftDriver {
+  uint16_t num_shift_registers;
   uint16_t num_strips;
   uint16_t leds_per_strip;
+
+
+  const int deviceClock = LCD_PCLK_IDX;
 
   uint8_t *alloc_addr;
   uint8_t *dma_buf;
@@ -241,10 +245,10 @@ class S3ClocklessDriver {
                                      void *user_data);
 
 public:
-  S3ClocklessDriver() {}
-  ~S3ClocklessDriver() { end(); }
+  S3ClocklessShiftDriver() {}
+  ~S3ClocklessShiftDriver() { end(); }
 
-  bool begin(const int *pins, uint16_t num_strips, uint16_t leds_per_strip) {
+  bool begin(const int *pins, const int latch_pin, const int clock_pin, uint16_t num_strips, uint16_t leds_per_strip) {
     if (num_strips == 0 || num_strips > 8) {
       ESP_LOGE("leds", "Invalid number of strips");
       return false;
@@ -284,9 +288,9 @@ public:
     // Configure LCD clock
     LCD_CAM.lcd_clock.clk_en = 1;             // Enable clock
     LCD_CAM.lcd_clock.lcd_clk_sel = 2;        // PLL240M source
-    LCD_CAM.lcd_clock.lcd_clkm_div_a = 1;     // 1/1 fractional divide,
-    LCD_CAM.lcd_clock.lcd_clkm_div_b = 1;     // plus '99' below yields...
-    LCD_CAM.lcd_clock.lcd_clkm_div_num = 99;  // 1:100 prescale (2.4 MHz CLK)
+    LCD_CAM.lcd_clock.lcd_clkm_div_a = 4;     // 1/1 fractional divide,
+    LCD_CAM.lcd_clock.lcd_clkm_div_b = 10;     // plus '99' below yields...
+    LCD_CAM.lcd_clock.lcd_clkm_div_num = 10;  // 1:100 prescale (2.4 MHz CLK) // 19.2MHz CLK
     LCD_CAM.lcd_clock.lcd_ck_out_edge = 0;    // PCLK low in 1st half cycle
     LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
     LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)
@@ -317,6 +321,9 @@ public:
         esp_rom_gpio_connect_out_signal(pins[i], mux[i], false, false);
         gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pins[i]], PIN_FUNC_GPIO);
         // gpio_set_drive_capability((gpio_num_t)pins[i], (gpio_drive_cap_t)3);
+        // To Do:
+        // Route latch_pin & clock_pin 
+        // clock pin is LCD_PCLK_IDX
       }
     }
 
@@ -414,9 +421,14 @@ public:
     }
 
     // kick it off
+
+    // set latch low 
+
     gdma_start(dma_chan, (intptr_t)&dma_desc[0]);
     esp_rom_delay_us(1);
     LCD_CAM.lcd_user.lcd_start = 1;
+
+    //set latch high
   }
 
   void end() {
@@ -434,10 +446,10 @@ public:
 };
 
 template <uint16_t max_strips, uint16_t bytes_per_pixel>
-IRAM_ATTR bool S3ClocklessDriver<max_strips, bytes_per_pixel>::dma_callback(
+IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel>::dma_callback(
     gdma_channel_handle_t dma_chan, gdma_event_data_t *event_data,
     void *user_data) {
-  S3ClocklessDriver *_this = (S3ClocklessDriver *)user_data;
+  S3ClocklessShiftDriver *_this = (S3ClocklessShiftDriver *)user_data;
 
   // DMA callback seems to occur a moment before the last data has issued
   // (perhaps buffering between DMA and the LCD peripheral?), so pause a
@@ -455,240 +467,4 @@ IRAM_ATTR bool S3ClocklessDriver<max_strips, bytes_per_pixel>::dma_callback(
   }
 
   return true;
-}
-
-//-----------------------------------------------------------------------------
-// Clocked driver
-//-----------------------------------------------------------------------------
-
-enum class ColorDepth : uint8_t { C8Bit = 1, C16Bit = 2 };
-enum class SpiWidth : uint8_t { W1Bit = 1, W2Bit = 2, W4Bit = 4, W8Bit = 8 };
-enum class ElementsPerPixel : uint8_t { E3 = 3, E4 = 4 };
-
-constexpr size_t startFrameSize(ColorDepth depth, SpiWidth width) {
-  return (depth == ColorDepth::C8Bit)    ? 4 * size_t(width)
-         : (depth == ColorDepth::C16Bit) ? 16 * size_t(width)
-                                         : 0;
-}
-
-constexpr size_t endFrameSize(ElementsPerPixel epp, SpiWidth numChannels,
-                              uint16_t channelLength) {
-  // one bit per pixel, rounded up to
-  // the nearest byte. ch len 100 = 104
-  return epp == ElementsPerPixel::E3
-             ? 0
-             : (channelLength + 7) / 8 * size_t(numChannels);
-}
-
-// template class with templates for ColorDepth, SpiWidth, ElementsPerPixel
-template <ColorDepth color_depth, SpiWidth spi_width, ElementsPerPixel epp>
-class NewS3ClockedDriver {
-  uint16_t num_strips;
-  uint16_t leds_per_strip;
-
-  size_t dma_buffer_size;
-  uint8_t *dma_data = NULL;
-  spi_host_device_t spi_host_device;
-  spi_device_handle_t spi_handle = NULL;
-  spi_transaction_t spi_transaction;
-
-  bool inited = false;
-
-  SemaphoreHandle_t xRenderSemaphore;
-
-  static IRAM_ATTR void dma_callback(spi_transaction_t *trans);
-
-  int spi_pin_number(int i, const int *pins) {
-    return (i < num_strips && pins[i] >= 0) ? pins[i] : 1;
-  }
-
-public:
-  NewS3ClockedDriver() {}
-  ~NewS3ClockedDriver() { end(); }
-
-  bool begin(const int *pins, uint16_t num_strips, uint16_t leds_per_strip,
-             uint8_t sck) {
-
-    if (num_strips == 0 || num_strips > uint16_t(spi_width)) {
-      ESP_LOGE("leds", "Invalid number of strips");
-      return false;
-    }
-
-    if (inited) {
-      return inited;
-    }
-
-    this->num_strips = num_strips;
-    this->leds_per_strip = leds_per_strip;
-
-    // allocate DMA buffer
-    size_t pixel_data_size =
-        leds_per_strip * size_t(color_depth) * size_t(epp) * size_t(spi_width);
-    dma_buffer_size = startFrameSize(color_depth, spi_width) + pixel_data_size +
-                      endFrameSize(epp, spi_width, leds_per_strip);
-
-    // must have a 4 byte aligned buffer for SPI DMA
-    uint32_t alignment = dma_buffer_size % 4;
-    if (alignment) {
-      dma_buffer_size += 4 - alignment;
-    }
-
-    dma_data = static_cast<uint8_t *>(
-        heap_caps_malloc(dma_buffer_size, MALLOC_CAP_DMA));
-    memset(dma_data, 0, dma_buffer_size);
-
-    // init spi bus
-    esp_err_t ret;
-    spi_bus_config_t buscfg;
-    memset(&buscfg, 0x00, sizeof(buscfg));
-
-    // spi bus init requires all pins to be valid, so set unused pins to 1
-    // and then reclaim pin 1 at the end. this won't work if we want to use pin
-    // 1 as an actual LED output
-    buscfg.sclk_io_num = sck;
-    buscfg.data0_io_num = spi_pin_number(0, pins);
-    buscfg.data1_io_num = spi_pin_number(1, pins);
-    buscfg.data2_io_num = spi_pin_number(2, pins);
-    buscfg.data3_io_num = spi_pin_number(3, pins);
-    buscfg.data4_io_num = spi_pin_number(4, pins);
-    buscfg.data5_io_num = spi_pin_number(5, pins);
-    buscfg.data6_io_num = spi_pin_number(6, pins);
-    buscfg.data7_io_num = spi_pin_number(7, pins);
-
-    spi_host_device = SPI2_HOST;
-
-    buscfg.max_transfer_sz = dma_buffer_size;
-    if (spi_width == SpiWidth::W8Bit) {
-      buscfg.flags = SPICOMMON_BUSFLAG_OCTAL;
-    }
-    ret = spi_bus_initialize(spi_host_device, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-      ESP_LOGE("leds", "spi_bus_initialize failed");
-      return false;
-    }
-
-    // reclaim pin 1. does this actually work? hmm
-    esp_rom_gpio_connect_out_signal(1, SIG_GPIO_OUT_IDX, false, true);
-
-    // init spi device
-    spi_device_interface_config_t devcfg = {};
-    devcfg.clock_speed_hz = 4 * 1000 * 1000;
-    devcfg.mode = 0;
-    devcfg.spics_io_num = -1;
-    devcfg.queue_size = 1;
-    if (spi_width == SpiWidth::W1Bit) {
-      devcfg.flags = 0;
-    } else {
-      devcfg.flags = SPI_DEVICE_HALFDUPLEX;
-    }
-    devcfg.post_cb = dma_callback;
-
-    ret = spi_bus_add_device(spi_host_device, &devcfg, &spi_handle);
-    if (ret != ESP_OK) {
-      ESP_LOGE("leds", "spi_bus_initialize failed");
-      return false;
-    }
-
-    // Max count 1, initial count 0
-    xRenderSemaphore = xSemaphoreCreateCounting(1, 0);
-    xSemaphoreGive(xRenderSemaphore);
-
-    inited = true;
-    return inited;
-  }
-
-  void stage(CRGB *leds, CRGBOut &out) {
-    // we process & transpose one pixel at a time * max_strips
-    uint8_t packed[size_t(epp) * size_t(color_depth) * size_t(spi_width)] = {0};
-
-    uint8_t *output = dma_data + startFrameSize(color_depth, spi_width);
-
-    for (int i = 0; i < leds_per_strip; i++) {
-      for (int j = 0; j < num_strips; j++) {
-        // color order, gamma, brightness
-        CRGB *p = &(leds)[i + j * leds_per_strip];
-        CRGBA pixel = out.ApplyRGBA(*p);
-
-        // hardcoded for 8 bit for now
-        packed[j + 0] = pixel.raw[0];
-        packed[j + 8] = pixel.raw[1];
-        packed[j + 16] = pixel.raw[2];
-        packed[j + 24] = pixel.raw[3];
-      }
-
-      // transpose - hardcoded for 8 bit for now
-      for (int i = 0; i < size_t(epp); i++) {
-
-        transpose8x1((unsigned char *)(packed + 8 * i),
-                     (unsigned char *)(output + 8 * i));
-      }
-
-      output += sizeof(packed);
-    }
-  }
-
-  void show(CRGB *leds, CRGBOut &out) {
-    if (!inited) {
-      ESP_LOGW("leds", "Show called before successful init");
-      return;
-    }
-
-    // wait for previous call to show to complete
-    xSemaphoreTake(xRenderSemaphore, portMAX_DELAY);
-
-    // stage
-    stage(leds, out);
-
-    // prepare txn
-    memset(&spi_transaction, 0, sizeof(spi_transaction));
-    spi_transaction.length = dma_buffer_size * 8; // in bits not bytes!
-    if (spi_width == SpiWidth::W1Bit) {
-      spi_transaction.flags = 0;
-    }
-    if (spi_width == SpiWidth::W2Bit) {
-      spi_transaction.flags = SPI_TRANS_MODE_DIO;
-    }
-    if (spi_width == SpiWidth::W4Bit) {
-      spi_transaction.flags = SPI_TRANS_MODE_QIO;
-    }
-    if (spi_width == SpiWidth::W8Bit) {
-      spi_transaction.flags = SPI_TRANS_MODE_OCT;
-    }
-    spi_transaction.tx_buffer = dma_data;
-    spi_transaction.user = this;
-
-    // kick it off
-    esp_err_t ret = spi_device_queue_trans(spi_handle, &spi_transaction, 0);
-    if (ret != ESP_OK) {
-      ESP_LOGE("leds", "spi_device_queue_trans failed: %d", ret);
-      xSemaphoreGive(xRenderSemaphore);
-    }
-  }
-
-  void end() {
-    if (nullptr != spi_handle) {
-      spi_bus_remove_device(spi_handle);
-      spi_handle = nullptr;
-      spi_bus_free(spi_host_device);
-    }
-
-    if (nullptr != dma_data) {
-      heap_caps_free(dma_data);
-      dma_data = nullptr;
-    }
-
-    inited = false;
-  }
-};
-
-template <ColorDepth color_depth, SpiWidth spi_width, ElementsPerPixel epp>
-IRAM_ATTR void NewS3ClockedDriver<color_depth, spi_width, epp>::dma_callback(
-    spi_transaction_t *spi_tran) {
-  NewS3ClockedDriver *_this = (NewS3ClockedDriver *)spi_tran->user;
-
-  portBASE_TYPE HPTaskAwoken = 0;
-  xSemaphoreGiveFromISR(_this->xRenderSemaphore, &HPTaskAwoken);
-  if (HPTaskAwoken == pdTRUE) {
-    portYIELD_FROM_ISR(HPTaskAwoken);
-  }
 }
