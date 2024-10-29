@@ -223,12 +223,12 @@ __attribute__((always_inline)) inline void transpose8x1(unsigned char *A,
 // const uint16_t max_strips = 8;
 const uint32_t minimum_delay_between_frames_us = 350;
 
-template <uint16_t max_strips, uint16_t bytes_per_pixel>
+template <uint16_t max_strips, uint16_t bytes_per_pixel, uint16_t num_shift_registers>
 class S3ClocklessShiftDriver {
-  uint16_t num_shift_registers;
   uint16_t num_strips;
   uint16_t leds_per_strip;
-
+  uint16_t latch_pin;
+  uint16_t clock_pin;
 
   const int deviceClock = LCD_PCLK_IDX;
 
@@ -256,10 +256,11 @@ public:
 
     this->num_strips = num_strips;
     this->leds_per_strip = leds_per_strip;
-
+    this->latch_pin = latch_pin;
+    this->clock_pin = clock_pin;
     // we always transfer enough bytes for max strips, even if we're only using
     // fewer than max
-    uint32_t xfer_size = max_strips * leds_per_strip * bytes_per_pixel * 3;
+    uint32_t xfer_size = num_shift_registers * max_strips * leds_per_strip * bytes_per_pixel * 3;
     uint32_t buf_size = xfer_size + 3;
     int num_desc = (xfer_size + DMA_DESCRIPTOR_BUFFER_MAX_SIZE - 1) /
                    DMA_DESCRIPTOR_BUFFER_MAX_SIZE;
@@ -295,6 +296,16 @@ public:
     LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
     LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)
 
+    /*// Configure LCD clock
+    LCD_CAM.lcd_clock.clk_en = 1;             // Enable clock
+    LCD_CAM.lcd_clock.lcd_clk_sel = 2;        // PLL240M source
+    LCD_CAM.lcd_clock.lcd_clkm_div_a = 1;     // 1/1 fractional divide,
+    LCD_CAM.lcd_clock.lcd_clkm_div_b = 1;     // plus '99' below yields...
+    LCD_CAM.lcd_clock.lcd_clkm_div_num = 99;  // 1:100 prescale (2.4 MHz CLK)
+    LCD_CAM.lcd_clock.lcd_ck_out_edge = 0;    // PCLK low in 1st half cycle
+    LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
+    LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)*/
+
     // Configure frame format
     LCD_CAM.lcd_ctrl.lcd_rgb_mode_en = 0;    // i8080 mode (not RGB)
     LCD_CAM.lcd_rgb_yuv.lcd_conv_bypass = 0; // Disable RGB/YUV converter
@@ -316,7 +327,7 @@ public:
     };
 
     // Route LCD signals to GPIO pins
-    for (int i = 0; i < num_strips; i++) {
+    for (int i = 0; i < num_shift_registers; i++) {
       if (pins[i] >= 0) {
         esp_rom_gpio_connect_out_signal(pins[i], mux[i], false, false);
         gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pins[i]], PIN_FUNC_GPIO);
@@ -326,6 +337,18 @@ public:
         // clock pin is LCD_PCLK_IDX
       }
     }
+        //PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[latch_pin], PIN_FUNC_GPIO);
+        //gpio_set_direction((gpio_num_t)latch_pin, (gpio_mode_t)GPIO_MODE_DEF_OUTPUT);
+        //gpio_matrix_out(latch_pin, deviceBaseIndex + NBIS2SERIALPINS + 8, false, false);
+        
+        pinMode(latch_pin, OUTPUT);
+
+        esp_rom_gpio_connect_out_signal(clock_pin, LCD_PCLK_IDX, false, false);
+        gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[clock_pin], PIN_FUNC_GPIO);
+        gpio_set_drive_capability((gpio_num_t)clock_pin, (gpio_drive_cap_t)3);
+
+        gpio_set_drive_capability((gpio_num_t)latch_pin, (gpio_drive_cap_t)3);
+
 
     // Set up DMA descriptor list (length and data are set before xfer)
     dma_desc = (dma_descriptor_t *)alloc_addr; // At start of alloc'd buffer
@@ -372,40 +395,52 @@ public:
   }
 
   void stage(CRGB *leds, CRGBOut &out) {
-    // we process & transpose one pixel at a time * max_strips
-    uint8_t packed[bytes_per_pixel * max_strips] = {0};
-    uint8_t transposed[bytes_per_pixel * max_strips] = {0};
+    // we process & transpose one pixel at a time * max_strips * num_shift_registers
+    uint8_t packed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
+    uint8_t transposed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
 
     uint8_t *output = dma_buf;
+    
+      for (int i = 0; i < leds_per_strip; i++) {
+        for (int k = 0; k < num_shift_registers; k++) { 
+          for (int j = 0; j < num_strips; j++) {
 
-    for (int i = 0; i < leds_per_strip; i++) {
-      for (int j = 0; j < num_strips; j++) {
-        // color order, gamma, brightness
-        CRGB *p = &(leds)[i + j * leds_per_strip];
-        CRGB pixel = out.ApplyRGB(*p);
-        packed[j + 0] = pixel.raw[0];
-        packed[j + 8] = pixel.raw[1];
-        packed[j + 16] = pixel.raw[2];
-      }
+          // color order, gamma, brightness
+            //Serial.println("entered pixel loop");
+            //CRGB *p = &(leds)[ i + j * leds_per_strip)];
+            CRGB *p = &(leds)[i + j + k * leds_per_strip]; // '+ k' Might not be correct
+            Serial.println(i + j + k * leds_per_strip);
+            //Serial.println("made it passed *p assignment");
+            CRGB pixel = out.ApplyRGB(*p);
+            packed[(k * j) + 0] = pixel.raw[0];           // 'k *' Might not be correct
+            packed[(k * j) + 8] = pixel.raw[1];           // 'k *' Might not be correct
+            packed[(k * j) + 16] = pixel.raw[2];          // 'k *' Might not be correct
+          }
+        }
 
-      // transpose
-      for (int i = 0; i < bytes_per_pixel; i++) {
-        transpose8x1((unsigned char *)(packed + 8 * i),
-                     (unsigned char *)(transposed + 8 * i));
-      }
+        // transpose
+        for (int i = 0; i < bytes_per_pixel; i++) {
+          transpose8x1((unsigned char *)(packed + 8 * i),
+                      (unsigned char *)(transposed + 8 * i));
+        }
 
-      // copy to DMA buffer
-      for (int i = 0; i < bytes_per_pixel * max_strips; i++, output += 3) {
-        output[0] = 0xFF;
-        output[1] = transposed[i];
-        output[2] = 0x00;
+        // copy to DMA buffer
+        for (int i = 0; i < bytes_per_pixel * (max_strips * num_shift_registers); i++, output += 3) {
+          output[0] = 0xFF;
+          output[1] = transposed[i];
+          output[2] = 0x00;
+        }
       }
-    }
+    
   }
-
+  
   void show(CRGB *leds, CRGBOut &out) {
     // wait for previous call to show to complete
     xSemaphoreTake(xRenderSemaphore, portMAX_DELAY);
+    //set latch high
+    digitalWrite(latch_pin, HIGH);// Not sure why I thought this would work, unsuprised it doesn't
+                                  // Data needs to be latched out for every 8 bits sent to shift register, this does not do that
+    ESP_LOGI("leds","Set latch high");
 
     gdma_reset(dma_chan);
     LCD_CAM.lcd_user.lcd_dout = 1;
@@ -423,12 +458,14 @@ public:
     // kick it off
 
     // set latch low 
+    digitalWrite(latch_pin, LOW); // Not sure why I thought this would work, unsuprised it doesn't
+                                  // Data needs to be latched out for every 8 bits sent to shift register, this does not do that
+    ESP_LOGI("leds","Set latch low");
 
     gdma_start(dma_chan, (intptr_t)&dma_desc[0]);
     esp_rom_delay_us(1);
     LCD_CAM.lcd_user.lcd_start = 1;
 
-    //set latch high
   }
 
   void end() {
@@ -445,8 +482,8 @@ public:
   }
 };
 
-template <uint16_t max_strips, uint16_t bytes_per_pixel>
-IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel>::dma_callback(
+template <uint16_t max_strips, uint16_t bytes_per_pixel, uint16_t num_shift_registers>
+IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel, num_shift_registers>::dma_callback(
     gdma_channel_handle_t dma_chan, gdma_event_data_t *event_data,
     void *user_data) {
   S3ClocklessShiftDriver *_this = (S3ClocklessShiftDriver *)user_data;
