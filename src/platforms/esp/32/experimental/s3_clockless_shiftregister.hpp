@@ -289,22 +289,12 @@ public:
     // Configure LCD clock
     LCD_CAM.lcd_clock.clk_en = 1;             // Enable clock
     LCD_CAM.lcd_clock.lcd_clk_sel = 2;        // PLL240M source
-    LCD_CAM.lcd_clock.lcd_clkm_div_a = 4;     // 1/1 fractional divide,
-    LCD_CAM.lcd_clock.lcd_clkm_div_b = 10;     // plus '99' below yields...
-    LCD_CAM.lcd_clock.lcd_clkm_div_num = 10;  // 1:100 prescale (2.4 MHz CLK) // 19.2MHz CLK
+    LCD_CAM.lcd_clock.lcd_clkm_div_a = 4;     //     240 /
+    LCD_CAM.lcd_clock.lcd_clkm_div_b = 10;    // (10 + 10 / 4)
+    LCD_CAM.lcd_clock.lcd_clkm_div_num = 10;  // = 19.2MHz CLK
     LCD_CAM.lcd_clock.lcd_ck_out_edge = 0;    // PCLK low in 1st half cycle
     LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
     LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)
-
-    /*// Configure LCD clock
-    LCD_CAM.lcd_clock.clk_en = 1;             // Enable clock
-    LCD_CAM.lcd_clock.lcd_clk_sel = 2;        // PLL240M source
-    LCD_CAM.lcd_clock.lcd_clkm_div_a = 1;     // 1/1 fractional divide,
-    LCD_CAM.lcd_clock.lcd_clkm_div_b = 1;     // plus '99' below yields...
-    LCD_CAM.lcd_clock.lcd_clkm_div_num = 99;  // 1:100 prescale (2.4 MHz CLK)
-    LCD_CAM.lcd_clock.lcd_ck_out_edge = 0;    // PCLK low in 1st half cycle
-    LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
-    LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)*/
 
     // Configure frame format
     LCD_CAM.lcd_ctrl.lcd_rgb_mode_en = 0;    // i8080 mode (not RGB)
@@ -337,16 +327,11 @@ public:
         // clock pin is LCD_PCLK_IDX
       }
     }
-        //PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[latch_pin], PIN_FUNC_GPIO);
-        //gpio_set_direction((gpio_num_t)latch_pin, (gpio_mode_t)GPIO_MODE_DEF_OUTPUT);
-        //gpio_matrix_out(latch_pin, deviceBaseIndex + NBIS2SERIALPINS + 8, false, false);
-        
-        pinMode(latch_pin, OUTPUT);
-
         esp_rom_gpio_connect_out_signal(clock_pin, LCD_PCLK_IDX, false, false);
         gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[clock_pin], PIN_FUNC_GPIO);
         gpio_set_drive_capability((gpio_num_t)clock_pin, (gpio_drive_cap_t)3);
 
+        pinMode(latch_pin, OUTPUT);
         gpio_set_drive_capability((gpio_num_t)latch_pin, (gpio_drive_cap_t)3);
 
 
@@ -408,13 +393,23 @@ public:
           // color order, gamma, brightness
             //Serial.println("entered pixel loop");
             //CRGB *p = &(leds)[ i + j * leds_per_strip)];
-            CRGB *p = &(leds)[i + j + k * leds_per_strip]; // '+ k' Might not be correct
-            Serial.println(i + j + k * leds_per_strip);
+            CRGB *p = &(leds)[(i + j * leds_per_strip) + (leds_per_strip * num_strips * k)];
+            Serial.print("led #: ");
+            Serial.print((i + j * leds_per_strip) + (leds_per_strip * num_strips * k));
+            Serial.print(" Strip #: ");
+            Serial.print(j);
+            Serial.print(" Shift Register #: ");
+            Serial.print(k);
+            Serial.println();
             //Serial.println("made it passed *p assignment");
             CRGB pixel = out.ApplyRGB(*p);
-            packed[(k * j) + 0] = pixel.raw[0];           // 'k *' Might not be correct
-            packed[(k * j) + 8] = pixel.raw[1];           // 'k *' Might not be correct
-            packed[(k * j) + 16] = pixel.raw[2];          // 'k *' Might not be correct
+            packed[(j + ( num_strips * k ) ) + 0] = pixel.raw[0];
+            packed[(j + ( num_strips * k ) ) + 8] = pixel.raw[1];
+            packed[(j + ( num_strips * k ) ) + 16] = pixel.raw[2];
+
+            //packed[j + 0] = pixel.raw[0];
+            //packed[j + 8] = pixel.raw[1];
+            //packed[j + 16] = pixel.raw[2];
           }
         }
 
