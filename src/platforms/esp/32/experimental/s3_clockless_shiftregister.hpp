@@ -1,3 +1,4 @@
+//TODO: Make sure bits are transposed correctly, latch out data with correct timing
 #pragma once
 
 // File copied from https://github.com/chroma-tech/micropython/blob/fern/ports/esp32/usermodules/modcanopy/driver.h#L225
@@ -230,8 +231,6 @@ class S3ClocklessShiftDriver {
   uint16_t latch_pin;
   uint16_t clock_pin;
 
-  const int deviceClock = LCD_PCLK_IDX;
-
   uint8_t *alloc_addr;
   uint8_t *dma_buf;
   gdma_channel_handle_t dma_chan;
@@ -322,9 +321,6 @@ public:
         esp_rom_gpio_connect_out_signal(pins[i], mux[i], false, false);
         gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pins[i]], PIN_FUNC_GPIO);
         // gpio_set_drive_capability((gpio_num_t)pins[i], (gpio_drive_cap_t)3);
-        // To Do:
-        // Route latch_pin & clock_pin 
-        // clock pin is LCD_PCLK_IDX
       }
     }
         esp_rom_gpio_connect_out_signal(clock_pin, LCD_PCLK_IDX, false, false);
@@ -333,6 +329,7 @@ public:
 
         pinMode(latch_pin, OUTPUT);
         gpio_set_drive_capability((gpio_num_t)latch_pin, (gpio_drive_cap_t)3);
+
 
 
     // Set up DMA descriptor list (length and data are set before xfer)
@@ -349,6 +346,7 @@ public:
       dma_desc[i].next = &dma_desc[i + 1];
       dma_desc[i].dw0.size = dma_desc[i].dw0.length = bytesThisPass;
       dma_desc[i].buffer = &dma_buf[offset];
+
       bytesToGo -= bytesThisPass;
       offset += bytesThisPass;
     }
@@ -381,13 +379,13 @@ public:
 
   void stage(CRGB *leds, CRGBOut &out) {
     // we process & transpose one pixel at a time * max_strips * num_shift_registers
-    uint8_t packed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
-    uint8_t transposed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
+    uint16_t packed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
+    uint16_t transposed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
 
     uint8_t *output = dma_buf;
     
-      for (int i = 0; i < leds_per_strip; i++) {
-        for (int k = 0; k < num_shift_registers; k++) { 
+      for (int i = 0; i < leds_per_strip; i++) { 
+        for (int k = 0; k < num_shift_registers; k++) {
           for (int j = 0; j < num_strips; j++) {
 
           // color order, gamma, brightness
@@ -395,17 +393,39 @@ public:
             //CRGB *p = &(leds)[ i + j * leds_per_strip)];
             CRGB *p = &(leds)[(i + j * leds_per_strip) + (leds_per_strip * num_strips * k)];
             Serial.print("led #: ");
-            Serial.print((i + j * leds_per_strip) + (leds_per_strip * num_strips * k));
-            Serial.print(" Strip #: ");
+            Serial.println((i + j * leds_per_strip) + (leds_per_strip * num_strips * k));
+            /*Serial.print(" Strip #: ");
             Serial.print(j);
             Serial.print(" Shift Register #: ");
-            Serial.print(k);
-            Serial.println();
+            Serial.print(k);*/
             //Serial.println("made it passed *p assignment");
             CRGB pixel = out.ApplyRGB(*p);
-            packed[(j + ( num_strips * k ) ) + 0] = pixel.raw[0];
-            packed[(j + ( num_strips * k ) ) + 8] = pixel.raw[1];
-            packed[(j + ( num_strips * k ) ) + 16] = pixel.raw[2];
+            /*packed[j + 0] = pixel.raw[0];
+            packed[j + 8] = pixel.raw[1];
+            packed[j + 16] = pixel.raw[2];*/
+
+            packed[j + 0 + (24 * k)] = pixel.raw[0];
+            packed[j + 8 + (24 * k)] = pixel.raw[1];
+            packed[j + 16 + (24 * k)] = pixel.raw[2];
+
+            //Serial.print("Packed: ");
+
+            //Serial.print (" +0: ");
+            //Serial.print(j + 0 + (24 * k));
+
+            //Serial.print (" +8: ");
+            //Serial.print(j + 8 + (24 * k));
+
+            //Serial.print (" +16: ");
+            //Serial.print(j + 16 + (24 * k));
+
+            //Serial.println();
+            /*Serial.print("R: ");
+            Serial.print(pixel.raw[0], BIN);
+            Serial.print("G: ");
+            Serial.print(pixel.raw[1], BIN);
+            Serial.print("B: ");
+            Serial.println(pixel.raw[2], BIN);*/
 
             //packed[j + 0] = pixel.raw[0];
             //packed[j + 8] = pixel.raw[1];
@@ -420,11 +440,32 @@ public:
         }
 
         // copy to DMA buffer
+        Serial.println(" packed / transposed: ");
         for (int i = 0; i < bytes_per_pixel * (max_strips * num_shift_registers); i++, output += 3) {
+
           output[0] = 0xFF;
           output[1] = transposed[i];
           output[2] = 0x00;
+
+          if ((i + 1) % 3 == 0 && i != 0) {
+            Serial.print(packed[i-2], BIN);
+            Serial.print(packed[i-1], BIN);
+            Serial.print(packed[i], BIN);
+
+            Serial.print(" / ");
+
+            Serial.print(transposed[i-2], BIN);
+            Serial.print(transposed[i-1], BIN);
+            Serial.print(transposed[i], BIN);
+
+            Serial.print(" i: ");
+            Serial.print(i, DEC);
+            Serial.println();
+
+          }
+
         }
+        Serial.println();
       }
     
   }
@@ -432,10 +473,6 @@ public:
   void show(CRGB *leds, CRGBOut &out) {
     // wait for previous call to show to complete
     xSemaphoreTake(xRenderSemaphore, portMAX_DELAY);
-    //set latch high
-    digitalWrite(latch_pin, HIGH);// Not sure why I thought this would work, unsuprised it doesn't
-                                  // Data needs to be latched out for every 8 bits sent to shift register, this does not do that
-    ESP_LOGI("leds","Set latch high");
 
     gdma_reset(dma_chan);
     LCD_CAM.lcd_user.lcd_dout = 1;
@@ -451,11 +488,6 @@ public:
     }
 
     // kick it off
-
-    // set latch low 
-    digitalWrite(latch_pin, LOW); // Not sure why I thought this would work, unsuprised it doesn't
-                                  // Data needs to be latched out for every 8 bits sent to shift register, this does not do that
-    ESP_LOGI("leds","Set latch low");
 
     gdma_start(dma_chan, (intptr_t)&dma_desc[0]);
     esp_rom_delay_us(1);
