@@ -13,13 +13,12 @@ void loop() {
 
 #include <FastLED.h>
 #include "Arduino.h"
-#include "fx/storage/fs.hpp"
+#include "file_system.h"
 
 const int CHIP_SELECT_PIN = 5;
 
 Fs fs(CHIP_SELECT_PIN);
 
-#define INVALID_FILENAME "fhjdiskljdskj.txt"
 
 void setup() {
     Serial.begin(115200);
@@ -30,7 +29,7 @@ void setup() {
 }
 
 void loop() {
-    FileHandlePtr fh = fs.openRead(INVALID_FILENAME);
+    FileHandleRef fh = fs.openRead("data/video.dat");
     if (!fh) {
       Serial.println("Failed to open SD card because sd is null");
     } else {

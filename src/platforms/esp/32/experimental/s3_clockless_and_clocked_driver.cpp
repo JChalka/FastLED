@@ -1,4 +1,8 @@
-#pragma once
+#include "enabled.h"
+
+
+#if FASTLED_ESP32_SPI_CLOCKLESS_ENABLED
+
 
 // File copied from https://github.com/chroma-tech/micropython/blob/fern/ports/esp32/usermodules/modcanopy/driver.h#L225
 
@@ -223,6 +227,9 @@ __attribute__((always_inline)) inline void transpose8x1(unsigned char *A,
 // const uint16_t max_strips = 8;
 const uint32_t minimum_delay_between_frames_us = 350;
 
+
+// Zach's note: IRAM_ATTR is NOT honored for implicitly instantiated
+// templates. This needs to be refactored.
 template <uint16_t max_strips, uint16_t bytes_per_pixel>
 class S3ClocklessDriver {
   uint16_t num_strips;
@@ -364,7 +371,7 @@ public:
     return true;
   }
 
-  void stage(CRGB *leds, CRGBOut &out) {
+  void stage(uint8_t *leds, CRGBOut &out) {
     // we process & transpose one pixel at a time * max_strips
     uint8_t packed[bytes_per_pixel * max_strips] = {0};
     uint8_t transposed[bytes_per_pixel * max_strips] = {0};
@@ -374,7 +381,7 @@ public:
     for (int i = 0; i < leds_per_strip; i++) {
       for (int j = 0; j < num_strips; j++) {
         // color order, gamma, brightness
-        CRGB *p = &(leds)[i + j * leds_per_strip];
+        CRGB *p = &((CRGB *)leds)[i + j * leds_per_strip];
         CRGB pixel = out.ApplyRGB(*p);
         packed[j + 0] = pixel.raw[0];
         packed[j + 8] = pixel.raw[1];
@@ -396,7 +403,7 @@ public:
     }
   }
 
-  void show(CRGB *leds, CRGBOut &out) {
+  void show(uint8_t *leds, CRGBOut &out) {
     // wait for previous call to show to complete
     xSemaphoreTake(xRenderSemaphore, portMAX_DELAY);
 
@@ -597,7 +604,7 @@ public:
     return inited;
   }
 
-  void stage(CRGB *leds, CRGBOut &out) {
+  void stage(uint8_t *leds, CRGBOut &out) {
     // we process & transpose one pixel at a time * max_strips
     uint8_t packed[size_t(epp) * size_t(color_depth) * size_t(spi_width)] = {0};
 
@@ -606,7 +613,7 @@ public:
     for (int i = 0; i < leds_per_strip; i++) {
       for (int j = 0; j < num_strips; j++) {
         // color order, gamma, brightness
-        CRGB *p = &(leds)[i + j * leds_per_strip];
+        CRGB *p = &((CRGB *)leds)[i + j * leds_per_strip];
         CRGBA pixel = out.ApplyRGBA(*p);
 
         // hardcoded for 8 bit for now
@@ -627,7 +634,7 @@ public:
     }
   }
 
-  void show(CRGB *leds, CRGBOut &out) {
+  void show(uint8_t *leds, CRGBOut &out) {
     if (!inited) {
       ESP_LOGW("leds", "Show called before successful init");
       return;
@@ -692,3 +699,5 @@ IRAM_ATTR void NewS3ClockedDriver<color_depth, spi_width, epp>::dma_callback(
     portYIELD_FROM_ISR(HPTaskAwoken);
   }
 }
+
+#endif  // FASTLED_ESP32_SPI_CLOCKLESS_ENABLED

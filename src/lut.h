@@ -5,9 +5,13 @@ LUT - Look up table implementation for various types.
 */
 
 #include <stdint.h>
-#include "ptr.h"
+#include "ref.h"
 #include "force_inline.h"
 #include "allocator.h"
+
+#include "namespace.h"
+
+FASTLED_NAMESPACE_BEGIN
 
 template<typename T>
 struct pair_xy {
@@ -29,14 +33,14 @@ class LUT;
 typedef LUT<uint16_t> LUT16;
 typedef LUT<pair_xy_float> LUTXYFLOAT;
 
-DECLARE_SMART_PTR_NO_FWD(LUT16);
-DECLARE_SMART_PTR_NO_FWD(LUTXYFLOAT);
+FASTLED_SMART_REF_NO_FWD(LUT16);
+FASTLED_SMART_REF_NO_FWD(LUTXYFLOAT);
 
 // Templated lookup table.
 template<typename T>
 class LUT : public Referent {
 public:
-    friend class PtrTraits<LUT<T>>;
+    friend class RefTraits<LUT<T>>;
     LUT(uint32_t length) : length(length) {
         T* ptr = LargeBlockAllocator<T>::Alloc(length);
         mDataHandle.reset(ptr);
@@ -68,3 +72,4 @@ private:
     uint32_t length;
 };
 
+FASTLED_NAMESPACE_END

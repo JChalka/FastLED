@@ -1,21 +1,33 @@
 #ifdef __EMSCRIPTEN__
 
+#include <emscripten.h>
+
+#include <sstream>
+#include <vector>
+
+
+
 #include "ui_manager.h"
 #include "fixed_map.h"
 #include "json.h"
+#include "namespace.h"
+
+
 #include <emscripten.h>
 #include <sstream>
 #include <vector>
 
+#include "namespace.h"
+
 FASTLED_NAMESPACE_BEGIN
 
-void jsUiManager::addComponent(WeakPtr<jsUiInternal> component) {
+void jsUiManager::addComponent(WeakRef<jsUiInternal> component) {
     std::lock_guard<std::mutex> lock(instance().mMutex);
     instance().mComponents.insert(component);
     instance().mItemsAdded = true;
 }
 
-void jsUiManager::removeComponent(WeakPtr<jsUiInternal> component) {
+void jsUiManager::removeComponent(WeakRef<jsUiInternal> component) {
     std::lock_guard<std::mutex> lock(instance().mMutex);
     instance().mComponents.erase(component);
 }
@@ -24,8 +36,8 @@ jsUiManager &jsUiManager::instance() {
     return Singleton<jsUiManager>::instance();
 }
 
-std::vector<jsUiInternalPtr> jsUiManager::getComponents() {
-    std::vector<jsUiInternalPtr> components;
+std::vector<jsUiInternalRef> jsUiManager::getComponents() {
+    std::vector<jsUiInternalRef> components;
     {
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -43,9 +55,9 @@ std::vector<jsUiInternalPtr> jsUiManager::getComponents() {
 }
 
 void jsUiManager::updateUiComponents(const char *jsonStr) {
-    ArduinoJson::JsonDocument doc;
-    ArduinoJson::DeserializationError error =
-        ArduinoJson::deserializeJson(doc, jsonStr);
+    FLArduinoJson::JsonDocument doc;
+    FLArduinoJson::DeserializationError error =
+        FLArduinoJson::deserializeJson(doc, jsonStr);
     if (error) {
         printf("Error: Failed to parse JSON string: %s\n", error.c_str());
         return;
@@ -55,10 +67,10 @@ void jsUiManager::updateUiComponents(const char *jsonStr) {
     self.mHasPendingUpdate = true;
 }
 
-void jsUiManager::executeUiUpdates(const ArduinoJson::JsonDocument &doc) {
+void jsUiManager::executeUiUpdates(const FLArduinoJson::JsonDocument &doc) {
     auto &self = instance();
-    for (ArduinoJson::JsonPairConst kv :
-         doc.as<ArduinoJson::JsonObjectConst>()) {
+    for (FLArduinoJson::JsonPairConst kv :
+         doc.as<FLArduinoJson::JsonObjectConst>()) {
         int id = atoi(kv.key().c_str());
         // double loop to avoid copying the value
         for (auto it = self.mComponents.begin();
@@ -75,11 +87,11 @@ void jsUiManager::executeUiUpdates(const ArduinoJson::JsonDocument &doc) {
     }
 }
 
-void jsUiManager::toJson(ArduinoJson::JsonArray &json) {
-    std::vector<jsUiInternalPtr> components = instance().getComponents();
+void jsUiManager::toJson(FLArduinoJson::JsonArray &json) {
+    std::vector<jsUiInternalRef> components = instance().getComponents();
     for (const auto &component : components) {
-        ArduinoJson::JsonObject componentJson =
-            json.add<ArduinoJson::JsonObject>();
+        FLArduinoJson::JsonObject componentJson =
+            json.add<FLArduinoJson::JsonObject>();
         component->toJson(componentJson);
         if (componentJson.size() == 0) {
             printf("Warning: Empty JSON from component\n");

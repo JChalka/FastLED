@@ -1,14 +1,17 @@
 #pragma once
-#include "fs.h"
-#include "namespace.h"
-#include "ptr.h"
-#include "slice.h"
+
 #include <string>
 #include <stdint.h>
 
+#include "file_system.h"
+#include "namespace.h"
+#include "ref.h"
+#include "slice.h"
+
+
 FASTLED_NAMESPACE_BEGIN
 
-FsImplPtr make_filesystem(int cs_pin);
+FsImplRef make_filesystem(int cs_pin);
 
 FASTLED_NAMESPACE_END
 

@@ -1,16 +1,6 @@
 
 #ifdef __EMSCRIPTEN__
 
-#include "fs.h"
-#include "math_macros.h"
-#include "namespace.h"
-#include "ptr.h"
-#include "str.h"
-#include "json.h"
-#include "warn.h"
-#include <map>
-#include <mutex>
-#include <vector>
 
 #include <emscripten.h>
 #include <emscripten/emscripten.h> // Include Emscripten headers
@@ -18,15 +8,31 @@
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+
+#include <map>
+#include <mutex>
+#include <vector>
+#include <stdio.h>
+
+
+#include "file_system.h"
+#include "math_macros.h"
+#include "namespace.h"
+#include "ref.h"
+#include "str.h"
+#include "json.h"
+#include "warn.h"
+
+
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(FsImplWasm);
-DECLARE_SMART_PTR(WasmFileHandle);
+FASTLED_SMART_REF(FsImplWasm);
+FASTLED_SMART_REF(WasmFileHandle);
 
 namespace {
 // Map is great because it doesn't invalidate it's data members unless erase is
 // called.
-DECLARE_SMART_PTR(FileData);
+FASTLED_SMART_REF(FileData);
 
 class FileData : public Referent {
   public:
@@ -64,7 +70,7 @@ private:
     mutable std::mutex mMutex;
 };
 
-typedef std::map<Str, FileDataPtr> FileMap;
+typedef std::map<Str, FileDataRef> FileMap;
 FileMap gFileMap;
 // At the time of creation, it's unclear whether this can be called by multiple
 // threads. With an std::map items remain valid while not erased. So we only
@@ -75,12 +81,12 @@ std::mutex gFileMapMutex;
 
 class WasmFileHandle : public FileHandle {
   private:
-    FileDataPtr mData;
+    FileDataRef mData;
     size_t mPos;
     Str mPath;
 
   public:
-    WasmFileHandle(const Str &path, const FileDataPtr data)
+    WasmFileHandle(const Str &path, const FileDataRef data)
         : mPath(path), mData(data), mPos(0) {}
 
     virtual ~WasmFileHandle() override {}
@@ -111,65 +117,69 @@ class FsImplWasm : public FsImpl {
     bool begin() override { return true; }
     void end() override {}
 
-    void close(FileHandlePtr file) override {
+    void close(FileHandleRef file) override {
+        printf("Closing file %s\n", file->path());
         if (file) {
             file->close();
         }
     }
 
-    FileHandlePtr openRead(const char *path) override {
-        Str key(path);
+    FileHandleRef openRead(const char *_path) override {
+        printf("Opening file %s\n", _path);
+        Str path(_path);
         std::lock_guard<std::mutex> lock(gFileMapMutex);
-        auto it = gFileMap.find(key);
+        auto it = gFileMap.find(path);
         if (it != gFileMap.end()) {
             auto &data = it->second;
-            WasmFileHandlePtr out =
-                WasmFileHandlePtr::TakeOwnership(new WasmFileHandle(key, data));
+            WasmFileHandleRef out =
+                WasmFileHandleRef::TakeOwnership(new WasmFileHandle(path, data));
             return out;
         }
-        return FileHandlePtr::Null();
+        return FileHandleRef::Null();
     }
 };
 
 // Platforms eed to implement this to create an instance of the filesystem.
-FsImplPtr make_filesystem(int cs_pin) { return FsImplWasmPtr::New(); }
+FsImplRef make_filesystem(int cs_pin) { return FsImplWasmRef::New(); }
 
 
-FileDataPtr _findIfExists(const Str& path) {
+FileDataRef _findIfExists(const Str& path) {
     std::lock_guard<std::mutex> lock(gFileMapMutex);
     auto it = gFileMap.find(path);
     if (it != gFileMap.end()) {
         return it->second;
     }
-    return FileDataPtr::Null();
+    return FileDataRef::Null();
 }
 
-FileDataPtr _findOrCreate(const Str& path, size_t len) {
+FileDataRef _findOrCreate(const Str& path, size_t len) {
     std::lock_guard<std::mutex> lock(gFileMapMutex);
     auto it = gFileMap.find(path);
     if (it != gFileMap.end()) {
         return it->second;
     }
-    auto entry = FileDataPtr::New(len);
+    auto entry = FileDataRef::New(len);
     gFileMap.insert(std::make_pair(path, entry));
     return entry;
 }
 
-FileDataPtr _createIfNotExists(const Str& path, size_t len) {
+FileDataRef _createIfNotExists(const Str& path, size_t len) {
     std::lock_guard<std::mutex> lock(gFileMapMutex);
     auto it = gFileMap.find(path);
     if (it != gFileMap.end()) {
-        return FileDataPtr::Null();
+        return FileDataRef::Null();
     }
-    auto entry = FileDataPtr::New(len);
+    auto entry = FileDataRef::New(len);
     gFileMap.insert(std::make_pair(path, entry));
     return entry;
 }
-
-
-
 
 FASTLED_NAMESPACE_END
+
+
+FASTLED_USING_NAMESPACE
+
+
 
 extern "C" {
 
@@ -188,7 +198,7 @@ EMSCRIPTEN_KEEPALIVE bool jsInjectFile(const char *path, const uint8_t *data,
 
 EMSCRIPTEN_KEEPALIVE bool jsAppendFile(const char *path, const uint8_t *data,
                                        size_t len) {
-    printf("Appending file %s with %d bytes\n", path, len);
+    printf("Appending file %s with %lu bytes\n", path, len);
     auto entry = _findIfExists(Str(path));
     if (!entry) {
         FASTLED_WARN("File must be declared before it can be appended.");
@@ -210,13 +220,13 @@ EMSCRIPTEN_KEEPALIVE bool jsDeclareFile(const char *path, size_t len) {
 
 
 EMSCRIPTEN_KEEPALIVE void fastled_declare_files(std::string jsonStr) {
-    ArduinoJson::JsonDocument doc;
-    ArduinoJson::deserializeJson(doc, jsonStr);
+    FLArduinoJson::JsonDocument doc;
+    FLArduinoJson::deserializeJson(doc, jsonStr);
     auto files = doc["files"];
     if (files.isNull()) {
         return;
     }
-    auto files_array = files.as<ArduinoJson::JsonArray>();
+    auto files_array = files.as<FLArduinoJson::JsonArray>();
     if (files_array.isNull()) {
         return;
     }

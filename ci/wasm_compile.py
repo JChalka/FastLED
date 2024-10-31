@@ -1,11 +1,14 @@
 import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import List
+
+import download  # type: ignore
 
 from ci.paths import PROJECT_ROOT
 
@@ -216,7 +219,106 @@ def run_container(directory: str, interactive: bool, debug: bool = False) -> Non
         raise WASMCompileError(f"ERROR: Failed to run Docker container.\n{e}")
 
 
-def main() -> None:
+def setup_docker2exe() -> None:
+    platform = ""
+    if sys.platform == "win32":
+        platform = "windows"
+    elif sys.platform == "darwin":
+        platform = "darwin"
+    elif sys.platform == "linux":
+        platform = "linux"
+
+    ignore_dir = PROJECT_ROOT / "ignore"
+    ignore_dir.mkdir(exist_ok=True)
+
+    docker2exe_path = ignore_dir / "docker2exe.exe"
+    if not docker2exe_path.exists():
+        download.download(
+            f"https://github.com/rzane/docker2exe/releases/download/v0.2.1/docker2exe-{platform}-amd64",
+            str(docker2exe_path),
+        )
+        docker2exe_path.chmod(0o755)
+    else:
+        print("docker2exe.exe already exists, skipping download.")
+
+    slim_cmd = [
+        str(docker2exe_path),
+        "--name",
+        "fastled",
+        "--image",
+        "niteris/fastled-wasm",
+        "--module",
+        "github.com/FastLED/FastLED",
+        "--target",
+        f"{platform}/amd64",
+    ]
+    full_cmd = slim_cmd + ["--embed"]
+
+    subprocess.run(
+        slim_cmd,
+        check=True,
+    )
+    print("Building wasm web command...")
+    print("Building wasm full command with no dependencies...")
+    subprocess.run(
+        full_cmd,
+        check=True,
+    )
+    move_files_to_dist(full=True)
+    print("Docker2exe done.")
+
+
+def move_files_to_dist(full: bool = False) -> None:
+    suffix = "-full" if full else ""
+    files = [
+        ("fastled-darwin-amd64", f"fastled-darwin-amd64{suffix}"),
+        ("fastled-darwin-arm64", f"fastled-darwin-arm64{suffix}"),
+        ("fastled-linux-amd64", f"fastled-linux-amd64{suffix}"),
+        ("fastled-windows-amd64.exe", f"fastled-windows-amd64{suffix}.exe"),
+    ]
+    for src, dest in files:
+        if not os.path.exists(src):
+            print(f"Skipping {src} as it does not exist.")
+            continue
+        src_path = PROJECT_ROOT / "dist" / src
+        dest_path = PROJECT_ROOT / "dist" / dest
+        if src_path.exists():
+            shutil.move(str(src_path), str(dest_path))
+        else:
+            print(f"Warning: {src_path} does not exist and will not be moved.")
+            print(f"Warning: {src_path} was expected to exist but does not.")
+
+
+def run_web_server(directory: str) -> None:
+    print("Launching web server at", directory)
+    print("Launching live-server at http://localhost")
+
+    # Check if live-server is installed
+    try:
+        print("running live-server --version")
+        subprocess.run(
+            "live-server --version", capture_output=True, shell=True, check=True
+        )
+    except subprocess.CalledProcessError:
+        print("live-server not found. Please install it with:")
+        print("npm install -g live-server")
+        return
+
+    # Create a detached command window running live-server
+    cmd_list = ["live-server"]
+    cmd_str = subprocess.list2cmdline(cmd_list)
+    print(f"Running command: {cmd_str} at {directory}")
+    subprocess.Popen(
+        cmd_str,
+        shell=True,
+        cwd=directory,
+        # creationflags=CREATE_NEW_CONSOLE | DETACHED_PROCESS
+    )
+    while True:
+        time.sleep(1)
+
+
+def main():
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description="WASM Compiler for FastLED"
     )
@@ -265,7 +367,16 @@ def main() -> None:
         action="store_true",
         help="Enables debug flags and disables optimization. Results in larger binary with debug info.",
     )
+    parser.add_argument(
+        "--build_wasm_compiler",
+        action="store_true",
+        help="Setup docker2exe for wasm compilation",
+    )
     args: argparse.Namespace = parser.parse_args()
+
+    if args.build_wasm_compiler:
+        setup_docker2exe()
+        return
     if args.no_build:
         args.build = False
     if args.no_open:
@@ -301,35 +412,6 @@ def main() -> None:
     except Exception as e:
         print(f"\033[91mUnexpected error: {str(e)}\033[0m")  # Print error in red
         sys.exit(1)
-
-
-def run_web_server(directory: str) -> None:
-    print("Launching web server at", directory)
-    print("Launching live-server at http://localhost")
-
-    # Check if live-server is installed
-    try:
-        print("running live-server --version")
-        subprocess.run(
-            "live-server --version", capture_output=True, shell=True, check=True
-        )
-    except subprocess.CalledProcessError:
-        print("live-server not found. Please install it with:")
-        print("npm install -g live-server")
-        return
-
-    # Create a detached command window running live-server
-    cmd_list = ["live-server"]
-    cmd_str = subprocess.list2cmdline(cmd_list)
-    print(f"Running command: {cmd_str} at {directory}")
-    subprocess.Popen(
-        cmd_str,
-        shell=True,
-        cwd=directory,
-        # creationflags=CREATE_NEW_CONSOLE | DETACHED_PROCESS
-    )
-    while True:
-        time.sleep(1)
 
 
 if __name__ == "__main__":

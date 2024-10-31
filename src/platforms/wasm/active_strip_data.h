@@ -1,12 +1,14 @@
 #pragma once
 
-#include <memory>
+
 
 #include <emscripten.h>
 #include <emscripten/emscripten.h> // Include Emscripten headers
 #include <emscripten/html5.h>
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
+
+#include <memory>
 
 #include "slice.h"
 #include "singleton.h"
@@ -15,7 +17,6 @@
 #include "namespace.h"
 #include "engine_events.h"
 #include "fixed_map.h"
-#include "active_strip_data.h"
 #include "screenmap.h"
 #include "strip_id_map.h"
 
@@ -72,3 +73,5 @@ private:
     StripDataMap mStripMap;
     ScreenMapMap mScreenMap;
 };
+
+FASTLED_NAMESPACE_END

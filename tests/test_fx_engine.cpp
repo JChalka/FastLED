@@ -9,7 +9,10 @@
 #include "fx/fx_engine.h"
 #include "FastLED.h"
 
-DECLARE_SMART_PTR(MockFx);
+#include "namespace.h"
+FASTLED_USING_NAMESPACE
+
+FASTLED_SMART_REF(MockFx);
 
 class MockFx : public Fx {
 public:
@@ -34,8 +37,8 @@ TEST_CASE("test_fx_engine") {
     FxEngine engine(NUM_LEDS);
     CRGB leds[NUM_LEDS];
 
-    Ptr<MockFx> redFx = MockFxPtr::New(NUM_LEDS, CRGB::Red);
-    Ptr<MockFx> blueFx = MockFxPtr::New(NUM_LEDS, CRGB::Blue);
+    Ref<MockFx> redFx = MockFxRef::New(NUM_LEDS, CRGB::Red);
+    Ref<MockFx> blueFx = MockFxRef::New(NUM_LEDS, CRGB::Blue);
 
     int id0 = engine.addFx(redFx);
     int id1 = engine.addFx(blueFx);

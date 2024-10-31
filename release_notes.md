@@ -1,4 +1,38 @@
 
+FastLED 3.9.2
+=============
+* WS28XX family of led chipsets can now be overclocked
+  * See also define `FASTLED_LED_OVERCLOCK`
+    * Example: `#define FASTLED_OVERCLOCK 1.2` (gives 20% overclock).
+    * You can set this define before you include `"FastLED.h"`
+    * Slower chips like AVR which do software bitbanging will ignore this.
+    * This discovery came from this reddit thread:
+      * https://www.reddit.com/r/FastLED/comments/1gdqtw5/comment/luegowu
+      * A special thanks to https://www.reddit.com/user/Tiny_Structure_7/ for discovering this!
+    * See examples/Overclock.ino for a working demo.
+  * You can either overclock globally or per led chipset on supported chipsets.
+  * Real world tests
+    * I (Zach Vorhies) have seen 25% overclock on my own test setup using cheap amazon WS2812.
+    * u/Tiny_Structure_7 was able to overclock quality WS2812 LEDs 800khz -> 1.2mhz!!
+    * Assuming 550 WS2812's can be driven at 60fps at normal clock.
+      * 25% overclock: 687 @ 60fps
+      * 50% overclock: 825 @ 60fps
+      * Animartrix benchmark (ESP32S3)
+        * 3.7.X: 34fps
+        * 3.9.0: 59fps
+        * 3.9.2: 70fps @ 20% overclock (after this the CPU becomes the bottleneck).
+      * FastLED is now likely at the theoretical maximum speed and efficiency for frame draw (async) & dispatch (overclock).
+  * Fixes `ESPAsyncWebServer.h` namespace collision with `fs.h` in FastLED, which has been renamed to `file_system.h`
+
+FastLED 3.9.1
+=============
+* Bug fix for namespace conflicts
+* One of our third_party libraries was causing a namespace conflict with ArduinoJson included by the user.
+  * If you are affected then please upgrade.
+* FastLED now supports it's own namespace, default is `fl`
+  * Off by default, as old code wants FastLED stuff to be global.
+  * Enable it by defining: `FASTLED_FORCE_NAMESPACE`
+
 
 FastLED 3.9.0
 =============

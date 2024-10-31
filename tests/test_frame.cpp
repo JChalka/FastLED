@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include "allocator.h"
 
+#include "namespace.h"
+FASTLED_USING_NAMESPACE
+
 namespace {
     int allocation_count = 0;
 
@@ -26,7 +29,7 @@ TEST_CASE("test frame custom allocator") {
     // Set our custom allocator
     SetLargeBlockAllocator(custom_malloc, custom_free);
     
-    FramePtr frame = FramePtr::New(100, true);  // 100 pixels with alpha channel
+    FrameRef frame = FrameRef::New(100, true);  // 100 pixels with alpha channel
     CHECK(allocation_count == 2);  // One for RGB, one for alpha
     frame.reset();
 

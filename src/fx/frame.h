@@ -1,14 +1,16 @@
 #pragma once
 
+#include <string.h>
+
 #include "namespace.h"
 #include "crgb.h"
-#include "ptr.h"
-#include <string.h>
+#include "ref.h"
+
 #include "allocator.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(Frame);
+FASTLED_SMART_REF(Frame);
 
 // Frames are used to hold led data. This includes an optional alpha channel. This object
 // is used by the fx and video engines. Most of the memory used for Fx and Video will be located

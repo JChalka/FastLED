@@ -1,21 +1,23 @@
 #pragma once
 
+#include <stdint.h>
+#include <string.h>
+
 #include "crgb.h"
 #include "fixed_vector.h"
 #include "fx/fx.h"
 #include "namespace.h"
-#include "ptr.h"
+#include "ref.h"
 #include "fx/frame.h"
-#include <stdint.h>
-#include <string.h>
+
 //#include <assert.h>
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(FxLayer);
+FASTLED_SMART_REF(FxLayer);
 class FxLayer : public Referent {
   public:
-    void setFx(Ptr<Fx> newFx) {
+    void setFx(Ref<Fx> newFx) {
         if (newFx != fx) {
             release();
             fx = newFx;
@@ -25,7 +27,7 @@ class FxLayer : public Referent {
     void draw(uint32_t now) {
         //assert(fx);
         if (!frame) {
-            frame = FramePtr::New(fx->getNumLeds());
+            frame = FrameRef::New(fx->getNumLeds());
         }
 
         if (!running) {
@@ -56,7 +58,7 @@ class FxLayer : public Referent {
         fx.reset();
     }
 
-    Ptr<Fx> getFx() { return fx; }
+    Ref<Fx> getFx() { return fx; }
 
     CRGB *getSurface() { return frame->rgb(); }
     uint8_t *getSurfaceAlpha() {
@@ -64,8 +66,8 @@ class FxLayer : public Referent {
     }
 
   private:
-    Ptr<Frame> frame;
-    Ptr<Fx> fx;
+    Ref<Frame> frame;
+    Ref<Fx> fx;
     bool running = false;
 };
 

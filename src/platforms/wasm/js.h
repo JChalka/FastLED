@@ -1,21 +1,26 @@
 #pragma once
 
-#include "ui/ui_internal.h"
+
+#include <emscripten.h>
+#include <emscripten/emscripten.h> // Include Emscripten headers
+
 #include <memory>
 #include <stdint.h>
 #include <stdio.h>
 #include <string>
 
-#include <emscripten.h>
-#include <emscripten/emscripten.h> // Include Emscripten headers
 
+
+#include "str.h"
+#include "ui/ui_internal.h"
+#include "str.h"
 #include "engine_events.h"
 #include "namespace.h"
 #include "screenmap.h"
-#include "ptr.h"
+#include "ref.h"
 #include "active_strip_data.h"
 
-FASTLED_NAMESPACE_BEGIN
+
 
 // Needed or the wasm compiler will strip them out.
 // Provide missing functions for WebAssembly build.
@@ -31,6 +36,8 @@ EMSCRIPTEN_KEEPALIVE uint32_t micros();
 EMSCRIPTEN_KEEPALIVE void delay(int ms);
 }
 
+FASTLED_NAMESPACE_BEGIN
+
 // Sets the canvas size. This assumes one strip per row. This is
 // method is pretty inflexible and is likely to change in the future.
 void jsSetCanvasSize(int cledcontroler_id, int width, int height);
@@ -43,7 +50,7 @@ class jsSlider {
     jsSlider& Group(const char* name) { mGroup = name; return *this; }
 
     const char *name() const;
-    void toJson(ArduinoJson::JsonObject& json) const;
+    void toJson(FLArduinoJson::JsonObject& json) const;
     float value() const;
     void setValue(float value);
     operator float() const;
@@ -64,9 +71,9 @@ class jsSlider {
     jsSlider& operator=(int value) { setValue(static_cast<float>(value)); return *this; }
 
   private:
-    void updateInternal(const ArduinoJson::JsonVariantConst& value);
+    void updateInternal(const FLArduinoJson::JsonVariantConst& value);
 
-    jsUiInternalPtr mInternal;
+    jsUiInternalRef mInternal;
     float mMin;
     float mMax;
     float mValue;
@@ -82,7 +89,7 @@ class jsNumberField {
     jsNumberField& Group(const char* name) { mGroup = name; return *this; }
 
     const char *name() const;
-    void toJson(ArduinoJson::JsonObject& json) const;
+    void toJson(FLArduinoJson::JsonObject& json) const;
     double value() const;
     void setValue(double value);
     operator double() const;
@@ -97,9 +104,9 @@ class jsNumberField {
     bool operator!=(int v) const { return value() != v; }
 
   private:
-    void updateInternal(const ArduinoJson::JsonVariantConst& value);
+    void updateInternal(const FLArduinoJson::JsonVariantConst& value);
 
-    jsUiInternalPtr mInternal;
+    jsUiInternalRef mInternal;
     double mValue;
     double mMin;
     double mMax;
@@ -114,7 +121,7 @@ class jsCheckbox {
     jsCheckbox& Group(const char* name) { mGroup = name; return *this; };
 
     const char *name() const;
-    void toJson(ArduinoJson::JsonObject& json) const;
+    void toJson(FLArduinoJson::JsonObject& json) const;
     bool value() const;
     void setValue(bool value);
     operator bool() const;
@@ -125,9 +132,9 @@ class jsCheckbox {
     jsCheckbox& operator=(int value) { setValue(value != 0); return *this; }
 
   private:
-    void updateInternal(const ArduinoJson::JsonVariantConst& value);
+    void updateInternal(const FLArduinoJson::JsonVariantConst& value);
 
-    jsUiInternalPtr mInternal;
+    jsUiInternalRef mInternal;
     bool mValue;
     Str mGroup;
 };
@@ -139,7 +146,7 @@ class jsButton {
     jsButton& Group(const char* name) { mGroup = name; return *this; }
 
     const char *name() const;
-    void toJson(ArduinoJson::JsonObject& json) const;
+    void toJson(FLArduinoJson::JsonObject& json) const;
     bool isPressed() const;
     bool clicked() const {
         bool clickedHappened = mPressed && (mPressed != mPressedLast);
@@ -164,9 +171,9 @@ class jsButton {
 
     Updater mUpdater;
 
-    void updateInternal(const ArduinoJson::JsonVariantConst& value);
+    void updateInternal(const FLArduinoJson::JsonVariantConst& value);
 
-    jsUiInternalPtr mInternal;
+    jsUiInternalRef mInternal;
     bool mPressed = false;
     bool mPressedLast = false;
     bool mClickedHappened = false;

@@ -1,18 +1,25 @@
 #pragma once
 
+#include <stdint.h>
+
+#include "force_inline.h"
+#include "lut.h"
+#include "ref.h"
+
+#include "str.h"
+#include "fixed_map.h"
+#include "json.h"
+#include "namespace.h"
+
 /* Screenmap maps strip indexes to x,y coordinates. This is used for FastLED.js
  * to map the 1D strip to a 2D grid. Note that the strip can have arbitrary
  * size. this was first motivated during the (attempted? Oct. 19th 2024) port of
  * the Chromancer project to FastLED.js.
  */
 
-#include "force_inline.h"
-#include "lut.h"
-#include "ptr.h"
-#include <stdint.h>
-#include "str.h"
-#include "fixed_map.h"
-#include "json.h"
+
+
+FASTLED_NAMESPACE_BEGIN
 
 class Str;
 
@@ -25,7 +32,7 @@ class ScreenMap {
 
     // is_reverse is false by default for linear layout
     ScreenMap(uint32_t length, float mDiameter = -1.0f) : length(length), mDiameter(mDiameter) {
-        mLookUpTable = LUTXYFLOATPtr::New(length);
+        mLookUpTable = LUTXYFLOATRef::New(length);
         LUTXYFLOAT &lut = *mLookUpTable.get();
         pair_xy_float *data = lut.getData();
         for (uint32_t x = 0; x < length; x++) {
@@ -34,7 +41,7 @@ class ScreenMap {
     }
 
     ScreenMap(const pair_xy_float *lut, uint32_t length, float diameter = -1.0) : length(length), mDiameter(diameter) {
-        mLookUpTable = LUTXYFLOATPtr::New(length);
+        mLookUpTable = LUTXYFLOATRef::New(length);
         LUTXYFLOAT &lut16xy = *mLookUpTable.get();
         pair_xy_float *data = lut16xy.getData();
         for (uint32_t x = 0; x < length; x++) {
@@ -43,7 +50,7 @@ class ScreenMap {
     }
 
     template <uint32_t N> ScreenMap(const pair_xy_float (&lut)[N], float diameter = -1.0) : length(N), mDiameter(diameter) {
-        mLookUpTable = LUTXYFLOATPtr::New(length);
+        mLookUpTable = LUTXYFLOATRef::New(length);
         LUTXYFLOAT &lut16xy = *mLookUpTable.get();
         pair_xy_float *data = lut16xy.getData();
         for (uint32_t x = 0; x < length; x++) {
@@ -102,7 +109,7 @@ class ScreenMap {
                           FixedMap<Str, ScreenMap, 16> *segmentMaps);
 
     static void toJsonStr(const FixedMap<Str, ScreenMap, 16>&, Str* jsonBuffer);
-    static void toJson(const FixedMap<Str, ScreenMap, 16>&, ArduinoJson::JsonDocument* doc);
+    static void toJson(const FixedMap<Str, ScreenMap, 16>&, FLArduinoJson::JsonDocument* doc);
 
   private:
     static const pair_xy_float &empty() {
@@ -111,5 +118,8 @@ class ScreenMap {
     }
     uint32_t length = 0;
     float mDiameter = -1.0f;  // Only serialized if it's not > 0.0f.
-    LUTXYFLOATPtr mLookUpTable;
+    LUTXYFLOATRef mLookUpTable;
 };
+
+
+FASTLED_NAMESPACE_END

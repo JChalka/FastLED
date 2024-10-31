@@ -2,11 +2,15 @@
 #pragma once
 
 #include <stdint.h>
+
 #include "chsv.h"
 #include "namespace.h"
 #include "color.h"
 #include "lib8tion/types.h"
 #include "force_inline.h"
+
+
+FASTLED_NAMESPACE_BEGIN
 
 // Whether to allow HD_COLOR_MIXING
 #ifndef FASTLED_HD_COLOR_MIXING
@@ -18,7 +22,6 @@
 #endif  // __AVR__
 #endif  // FASTLED_HD_COLOR_MIXING
 
-FASTLED_NAMESPACE_BEGIN
 
 struct CRGB;
 

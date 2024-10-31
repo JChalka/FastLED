@@ -1,7 +1,6 @@
 name: wasm
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - master
@@ -9,29 +8,48 @@ on:
     branches:
       - master
 
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Docker on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install docker
+          brew install colima
+          colima start --cpu 2 --memory 4 || (echo "Colima failed to start" && exit 1)
+
+      - name: Verify Colima installation
+        if: matrix.os == 'macos-latest'
+        run: |
+          colima version || (echo "Colima is not installed correctly" && exit 1)
+          docker --version
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install UV for python
         run: pip install uv
 
       - name: Compile fastled.js, fastled.wasm, and index.html
-        run: uv run ci/wasm_compile.py -b examples/wasm
+        run: |
+          uv run ci/wasm_compile.py -b examples/wasm
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
         shell: bash
 
       - name: Scan for wasm/js/html artifacts
         run: |
           find . -name "*.wasm" -o -name "*.js" -o -name "*.html"
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
 
       - name: Check for required artifacts
         run: |
@@ -41,6 +59,7 @@ jobs:
             exit 1
           fi
           echo "All required files are present."
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
 
       - name: Generate timestamp and random hex
         id: generate_id
@@ -53,7 +72,7 @@ jobs:
         with:
           name: wasm-artifacts-${{ steps.generate_id.outputs.timestamp }}-${{ github.sha }}-${{ steps.generate_id.outputs.random_hex }}
           path: examples/wasm/fastled_js/*.*
-          if-no-files-found: error
+          if-no-files-found: ${{ matrix.os == 'ubuntu-latest' && 'error' || 'ignore' }}
 
       - name: Install Playwright and verify FastLED_onFrame
         run: |
@@ -117,3 +136,5 @@ jobs:
               }
             })();
           "
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+

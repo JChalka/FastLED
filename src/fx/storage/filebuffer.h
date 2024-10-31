@@ -2,18 +2,18 @@
 #pragma once
 
 #include <stdint.h>
-#include "fs.h"
-#include "ptr.h"
 
+#include "file_system.h"
+#include "ref.h"
 #include "namespace.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(FileBuffer);
+FASTLED_SMART_REF(FileBuffer);
 
 class FileBuffer: public Referent {
  public:
-  FileBuffer(FileHandlePtr file);
+  FileBuffer(FileHandleRef file);
   virtual ~FileBuffer();
   void RewindToStart();
   bool available() const;
@@ -39,7 +39,7 @@ class FileBuffer: public Referent {
   int16_t mCurrIdx;
   int16_t mLength;
 
-  FileHandlePtr mFile;
+  FileHandleRef mFile;
   bool mIsOpen;
 };
 

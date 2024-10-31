@@ -1,13 +1,16 @@
 
 #ifdef __EMSCRIPTEN__
 
-#include <memory>
-
 #include <emscripten.h>
 #include <emscripten/bind.h>
 #include <emscripten/emscripten.h> // Include Emscripten headers
 #include <emscripten/html5.h>
 #include <emscripten/val.h>
+
+#include <memory>
+#include <stdio.h>
+
+
 
 #include "fixed_map.h"
 #include "singleton.h"
@@ -19,7 +22,7 @@
 #include "js.h"
 #include "str.h"
 #include "namespace.h"
-#include <stdio.h>
+
 
 FASTLED_NAMESPACE_BEGIN
 
@@ -49,11 +52,11 @@ emscripten::val ActiveStripData::getPixelData_Uint8(int stripIndex) {
 }
 
 Str ActiveStripData::infoJsonString() {
-    ArduinoJson::JsonDocument doc;
-    auto array = doc.to<ArduinoJson::JsonArray>();
+    FLArduinoJson::JsonDocument doc;
+    auto array = doc.to<FLArduinoJson::JsonArray>();
 
     for (const auto &[stripIndex, stripData] : mStripMap) {
-        auto obj = array.add<ArduinoJson::JsonObject>();
+        auto obj = array.add<FLArduinoJson::JsonObject>();
         obj["strip_id"] = stripIndex;
         obj["type"] = "r8g8b8";
     }
@@ -63,14 +66,14 @@ Str ActiveStripData::infoJsonString() {
     return jsonBuffer;
 }
 
-static ActiveStripData* getActiveStripDataPtr() {
+static ActiveStripData* getActiveStripDataRef() {
     ActiveStripData* instance = &Singleton<ActiveStripData>::instance();
     return instance;
 }
 
 EMSCRIPTEN_BINDINGS(engine_events_constructors) {
     emscripten::class_<ActiveStripData>("ActiveStripData")
-        .constructor(&getActiveStripDataPtr, emscripten::allow_raw_pointers())
+        .constructor(&getActiveStripDataRef, emscripten::allow_raw_pointers())
         .function("getPixelData_Uint8", &ActiveStripData::getPixelData_Uint8);
 }
 
@@ -81,5 +84,7 @@ __attribute__((constructor))
 void __init_ActiveStripData() {
     ActiveStripData::Instance();
 }
+
+FASTLED_NAMESPACE_END
 
 #endif

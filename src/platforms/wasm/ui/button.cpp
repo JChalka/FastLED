@@ -4,19 +4,20 @@
 #include "json.h"
 #include "platforms/wasm/js.h"
 #include "ui_manager.h"
+#include "namespace.h"
 
 FASTLED_NAMESPACE_BEGIN
 
 jsButton::jsButton(const char* name)
     : mPressed(false) {
-    auto updateFunc = jsUiInternal::UpdateFunction(this, [](void* self, const ArduinoJson::JsonVariantConst& value) {
+    auto updateFunc = jsUiInternal::UpdateFunction(this, [](void* self, const FLArduinoJson::JsonVariantConst& value) {
         static_cast<jsButton*>(self)->updateInternal(value);
     });
 
-    auto toJsonFunc = jsUiInternal::ToJsonFunction(this, [](void* self, ArduinoJson::JsonObject& json) {
+    auto toJsonFunc = jsUiInternal::ToJsonFunction(this, [](void* self, FLArduinoJson::JsonObject& json) {
         static_cast<jsButton*>(self)->toJson(json);
     });
-    mInternal = jsUiInternalPtr::New(name, std::move(updateFunc), std::move(toJsonFunc));
+    mInternal = jsUiInternalRef::New(name, std::move(updateFunc), std::move(toJsonFunc));
     jsUiManager::addComponent(mInternal);
     mUpdater.init(this);
 }
@@ -29,7 +30,7 @@ const char* jsButton::name() const {
     return mInternal->name();
 }
 
-void jsButton::toJson(ArduinoJson::JsonObject& json) const {
+void jsButton::toJson(FLArduinoJson::JsonObject& json) const {
     json["name"] = name();
     json["group"] = mGroup.c_str();
     json["type"] = "button";
@@ -44,7 +45,7 @@ bool jsButton::isPressed() const {
     return mPressed || mClickedHappened;
 }
 
-void jsButton::updateInternal(const ArduinoJson::JsonVariantConst& value) {
+void jsButton::updateInternal(const FLArduinoJson::JsonVariantConst& value) {
     mPressed = value.as<bool>();
 }
 

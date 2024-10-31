@@ -7,7 +7,8 @@
 #include "force_inline.h"
 #include "pixel_iterator.h"
 #include "crgb.h"
-#include <stdint.h>
+#include "eorder.h"
+
 
 
 #ifndef FASTLED_CLOCKLESS_USES_NANOSECONDS
@@ -30,7 +31,7 @@
 /// @file chipsets.h
 /// Contains the bulk of the definitions for the various LED chipsets supported.
 
-FASTLED_NAMESPACE_BEGIN
+
 
 /// @defgroup Chipsets LED Chipset Controllers
 /// Implementations of ::CLEDController classes for various led chipsets.
@@ -44,6 +45,8 @@ FASTLED_NAMESPACE_BEGIN
 #include <SoftwareSerial.h>
 
 #define HAS_PIXIE
+
+FASTLED_NAMESPACE_BEGIN
 
 /// Adafruit Pixie controller class
 /// @tparam DATA_PIN the pin to write data out on
@@ -88,12 +91,15 @@ protected:
 // 		STREAM.begin(115200);
 // 	}
 // };
+
+FASTLED_NAMESPACE_END
 #endif
 #endif
 
 // Emulution layer to support RGBW leds on RGB controllers. This works by creating
 // a side buffer dedicated for the RGBW data. The RGB data is then converted to RGBW
 // and sent to the delegate controller for rendering as if it were RGB data.
+FASTLED_NAMESPACE_BEGIN
 template <
 	typename CONTROLLER,
 	EOrder RGB_ORDER = GRB>  // Default on WS2812>
@@ -808,6 +814,38 @@ class UCS1912Controller : public ClocklessController<DATA_PIN, 2 * FMUL, 8 * FMU
 
 #else
 
+// Allow overclocking of the clockless family of leds. 1.2 would be
+// 20% overclocking. In tests WS2812 can be overclocked at 20%, but
+// various manufacturers may be different.  This is a global value
+// which is overridable by each supported chipset.
+#ifndef FASTLED_LED_OVERCLOCK
+#define FASTLED_LED_OVERCLOCK 1.0
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_WS2812
+#define FASTLED_LED_OVERCLOCK_WS2812 FASTLED_LED_OVERCLOCK
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_WS2811
+#define FASTLED_LED_OVERCLOCK_WS2811 FASTLED_LED_OVERCLOCK
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_WS2813
+#define FASTLED_LED_OVERCLOCK_WS2813 FASTLED_LED_OVERCLOCK
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_WS2815
+#define FASTLED_LED_OVERCLOCK_WS2815 FASTLED_LED_OVERCLOCK
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_SK6822
+#define FASTLED_LED_OVERCLOCK_SK6822 FASTLED_LED_OVERCLOCK
+#endif
+
+#ifndef FASTLED_LED_OVERCLOCK_SK6812
+#define FASTLED_LED_OVERCLOCK_SK6812 FASTLED_LED_OVERCLOCK
+#endif
+
 /// Calculates the number of cycles for the clockless chipset (which may differ from CPU cycles)
 /// @see ::NS()
 #if FASTLED_CLOCKLESS_USES_NANOSECONDS
@@ -816,6 +854,16 @@ class UCS1912Controller : public ClocklessController<DATA_PIN, 2 * FMUL, 8 * FMU
 #else
 #define C_NS(_NS) (((_NS * ((CLOCKLESS_FREQUENCY / 1000000L)) + 999)) / 1000)
 #endif
+
+// Allow overclocking various LED chipsets in the clockless family.
+// Clocked chips like the APA102 don't need this because they allow
+// you to control the clock speed directly.
+#define C_NS_WS2812(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_WS2812)))
+#define C_NS_WS2811(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_WS2811)))
+#define C_NS_WS2813(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_WS2813)))
+#define C_NS_WS2815(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_WS2815)))
+#define C_NS_SK6822(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_SK6822)))
+#define C_NS_SK6812(_NS) (C_NS(int(_NS / FASTLED_LED_OVERCLOCK_SK6812)))
 
 // At T=0        : the line is raised hi to start a bit
 // At T=T1       : the line is dropped low to transmit a zero bit
@@ -877,22 +925,22 @@ class TM1809Controller800Khz : public ClocklessController<DATA_PIN, C_NS(350), C
 
 // WS2811 - 320ns, 320ns, 640ns
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = GRB>
-class WS2811Controller800Khz : public ClocklessController<DATA_PIN, C_NS(320), C_NS(320), C_NS(640), RGB_ORDER> {};
+class WS2811Controller800Khz : public ClocklessController<DATA_PIN, C_NS_WS2811(320), C_NS_WS2811(320), C_NS_WS2811(640), RGB_ORDER> {};
 
 // WS2813 - 320ns, 320ns, 640ns
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = GRB>
-class WS2813Controller : public ClocklessController<DATA_PIN, C_NS(320), C_NS(320), C_NS(640), RGB_ORDER> {};
+class WS2813Controller : public ClocklessController<DATA_PIN, C_NS_WS2813(320), C_NS_WS2813(320), C_NS_WS2813(640), RGB_ORDER> {};
 
 // WS2812 - 250ns, 625ns, 375ns
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = GRB>
-class WS2812Controller800Khz : public ClocklessController<DATA_PIN, C_NS(250), C_NS(625), C_NS(375), RGB_ORDER> {};
+class WS2812Controller800Khz : public ClocklessController<DATA_PIN, C_NS_WS2812(250), C_NS_WS2812(625), C_NS_WS2812(375), RGB_ORDER> {};
 
 // WS2811@400khz - 800ns, 800ns, 900ns
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = GRB>
-class WS2811Controller400Khz : public ClocklessController<DATA_PIN, C_NS(800), C_NS(800), C_NS(900), RGB_ORDER> {};
+class WS2811Controller400Khz : public ClocklessController<DATA_PIN, C_NS_WS2811(800), C_NS_WS2811(800), C_NS_WS2811(900), RGB_ORDER> {};
 
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = GRB>
-class WS2815Controller : public ClocklessController<DATA_PIN, C_NS(250), C_NS(1090), C_NS(550), RGB_ORDER> {};
+class WS2815Controller : public ClocklessController<DATA_PIN, C_NS_WS2815(250), C_NS_WS2815(1090), C_NS_WS2815(550), RGB_ORDER> {};
 
 // 750NS, 750NS, 750NS
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = RGB>
@@ -912,10 +960,10 @@ class LPD1886Controller1250Khz_8bit : public ClocklessController<DATA_PIN, C_NS(
 
 
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = RGB>
-class SK6822Controller : public ClocklessController<DATA_PIN, C_NS(375), C_NS(1000), C_NS(375), RGB_ORDER> {};
+class SK6822Controller : public ClocklessController<DATA_PIN, C_NS_SK6822(375), C_NS_SK6822(1000), C_NS_SK6822(375), RGB_ORDER> {};
 
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = RGB>
-class SK6812Controller : public ClocklessController<DATA_PIN, C_NS(300), C_NS(300), C_NS(600), RGB_ORDER> {};
+class SK6812Controller : public ClocklessController<DATA_PIN, C_NS_SK6812(300), C_NS_SK6812(300), C_NS_SK6812(600), RGB_ORDER> {};
 
 template <uint8_t DATA_PIN, EOrder RGB_ORDER = RGB>
 class SM16703Controller : public ClocklessController<DATA_PIN, C_NS(300), C_NS(600), C_NS(300), RGB_ORDER> {};

@@ -1,14 +1,16 @@
 #pragma once
 
-#include "namespace.h"
-#include "ptr.h"
 #include <stddef.h>
 #include <stdint.h>
+
+#include "namespace.h"
+#include "ref.h"
+
 #include "crgb.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(ByteStream);
+FASTLED_SMART_REF(ByteStream);
 
 // An abstract class that represents a file handle.
 // Devices like the SD card will return one of these.

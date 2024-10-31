@@ -1,6 +1,8 @@
+#pragma once
 #ifndef __INC_FASTSPI_LED2_H
 #define __INC_FASTSPI_LED2_H
 
+#include <stdint.h>
 
 /// @file FastLED.h
 /// central include file for FastLED, defines the CFastLED class/object
@@ -14,13 +16,13 @@
 /// * 1 digit for the major version
 /// * 3 digits for the minor version
 /// * 3 digits for the patch version
-#define FASTLED_VERSION 3009000
+#define FASTLED_VERSION 3009001
 #ifndef FASTLED_INTERNAL
 #  ifdef  FASTLED_SHOW_VERSION
 #    ifdef FASTLED_HAS_PRAGMA_MESSAGE
-#      pragma message "FastLED version 3.009.000"
+#      pragma message "FastLED version 3.009.001"
 #    else
-#      warning FastLED version 3.009.000  (Not really a warning, just telling you here.)
+#      warning FastLED version 3.009.001  (Not really a warning, just telling you here.)
 #    endif
 #  endif
 #endif
@@ -48,7 +50,7 @@
 #include <OctoWS2811.h>
 #endif
 
-#include <stdint.h>
+
 
 #include "force_inline.h"
 #include "cpp_compat.h"
@@ -836,4 +838,8 @@ extern CFastLED FastLED;
 
 FASTLED_NAMESPACE_END
 
+#endif
+
+#if !defined(FASTLED_INTERNAL)
+FASTLED_USING_NAMESPACE
 #endif

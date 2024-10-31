@@ -1,15 +1,17 @@
 #pragma once
 
-#include "namespace.h"
-#include "ptr.h"
 #include <stddef.h>
 #include <stdint.h>
+
+#include "namespace.h"
+#include "ref.h"
+
 #include "bytestream.h"
 #include "fx/detail/circular_buffer.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(ByteStreamMemory);
+FASTLED_SMART_REF(ByteStreamMemory);
 
 class ByteStreamMemory : public ByteStream {
   public:

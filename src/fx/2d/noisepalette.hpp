@@ -11,12 +11,12 @@
 #include "fx/fx2d.h"
 #include "lib8tion/random8.h"
 #include "noise.h"
-#include "ptr.h"
+#include "ref.h"
 #include "xymap.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(NoisePalette);
+FASTLED_SMART_REF(NoisePalette);
 
 class NoisePalette : public FxGrid {
   public:

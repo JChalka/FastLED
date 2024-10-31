@@ -4,11 +4,11 @@
 
 #include "FastLED.h"
 #include "fx/fx2d.h"
-#include "ptr.h"
+#include "ref.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(RedSquare);
+FASTLED_SMART_REF(RedSquare);
 
 class RedSquare : public FxGrid {
   public:

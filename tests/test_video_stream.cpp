@@ -7,14 +7,17 @@
 #include "lib8tion/intmap.h"
 #include "fx/detail/data_stream.h"
 #include "fx/storage/bytestreammemory.h"
-#include "ptr.h"
+#include "ref.h"
+
+#include "namespace.h"
+FASTLED_USING_NAMESPACE
 
 TEST_CASE("video stream simple test") {
     const int BYTES_PER_FRAME = 3 * 10 * 10; // Assuming a 10x10 RGB video
     
     // Create a ByteStreamMemory
     const uint32_t BUFFER_SIZE = BYTES_PER_FRAME * 10; // Enough for 10 frames
-    ByteStreamMemoryPtr memoryStream = ByteStreamMemoryPtr::New(BUFFER_SIZE);
+    ByteStreamMemoryRef memoryStream = ByteStreamMemoryRef::New(BUFFER_SIZE);
 
     // Fill the ByteStreamMemory with test data
     uint8_t testData[BUFFER_SIZE];
@@ -24,7 +27,7 @@ TEST_CASE("video stream simple test") {
     memoryStream->write(testData, BUFFER_SIZE);
 
     // Create and initialize DataStream
-    DataStreamPtr DataStream = DataStreamPtr::New(BYTES_PER_FRAME);
+    DataStreamRef DataStream = DataStreamRef::New(BYTES_PER_FRAME);
     bool initSuccess = DataStream->beginStream(memoryStream);
     REQUIRE(initSuccess);
 

@@ -2,14 +2,14 @@
 
 #include "namespace.h"
 #include "crgb.h"
-#include "ptr.h"
+#include "ref.h"
 #include "fx/storage/filebuffer.h"
 #include "fx/storage/bytestream.h"
 #include "fx/frame.h"
 
 FASTLED_NAMESPACE_BEGIN
 
-DECLARE_SMART_PTR(DataStream);
+FASTLED_SMART_REF(DataStream);
 
 // DataStream is a class that reads data from a file or a stream.
 // It's sort of a merging point for the two types of data sources.
@@ -23,8 +23,8 @@ class DataStream: public Referent {
 
   explicit DataStream(int bytes_per_frame);
 
-  bool begin(FileHandlePtr h);
-  bool beginStream(ByteStreamPtr s);
+  bool begin(FileHandleRef h);
+  bool beginStream(ByteStreamRef s);
   void Close();
   int32_t BytesPerFrame();
   bool ReadPixel(CRGB* dst);
@@ -43,9 +43,9 @@ class DataStream: public Referent {
  private:
   void init(int bytes_per_frame);
   int32_t mBytesPerFrame;
-  FileHandlePtr mFileHandle;
-  FileBufferPtr mFileBuffer;
-  ByteStreamPtr mByteStream;
+  FileHandleRef mFileHandle;
+  FileBufferRef mFileBuffer;
+  ByteStreamRef mByteStream;
   bool mUsingByteStream;
 
 protected:

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "ptr.h"
-#include "string.h"
+#include <string.h>
 #include <stdint.h>
 
+#include "ref.h"
 #include "namespace.h"
 
 FASTLED_NAMESPACE_BEGIN
@@ -30,7 +30,7 @@ class Str;
 ///////////////////////////////////////////////////////
 // Implementation details.
 
-DECLARE_SMART_PTR(StringHolder);
+FASTLED_SMART_REF(StringHolder);
 
 class StringFormatter {
   public:
@@ -60,7 +60,7 @@ template <size_t SIZE = 64> class StrN {
   private:
     size_t mLength = 0;
     char mInlineData[SIZE] = {0};
-    StringHolderPtr mHeapData;
+    StringHolderRef mHeapData;
 
   public:
     // Constructors
@@ -75,7 +75,7 @@ template <size_t SIZE = 64> class StrN {
             memcpy(mInlineData, str, len + 1);
             mHeapData.reset();
         } else {
-            mHeapData = StringHolderPtr::New(str);
+            mHeapData = StringHolderRef::New(str);
         }
     }
     StrN(const StrN &other) { copy(other); }
@@ -93,7 +93,7 @@ template <size_t SIZE = 64> class StrN {
                 return;
             }
             mHeapData.reset();
-            mHeapData = StringHolderPtr::New(str);
+            mHeapData = StringHolderRef::New(str);
         }
     }
     StrN &operator=(const StrN &other) {
@@ -123,7 +123,7 @@ template <size_t SIZE = 64> class StrN {
             if (other.mHeapData) {
                 mHeapData = other.mHeapData;
             } else {
-                mHeapData = StringHolderPtr::New(other.c_str());
+                mHeapData = StringHolderRef::New(other.c_str());
             }
         }
         mLength = len;
@@ -158,7 +158,7 @@ template <size_t SIZE = 64> class StrN {
             return mLength;
         }
         mHeapData.reset();
-        StringHolderPtr newData = StringHolderPtr::New(newLen);
+        StringHolderRef newData = StringHolderRef::New(newLen);
         if (newData) {
             memcpy(newData->data(), c_str(), mLength);
             memcpy(newData->data() + mLength, str, n);
@@ -218,7 +218,7 @@ template <size_t SIZE = 64> class StrN {
     }
 
   private:
-    StringHolderPtr mData;
+    StringHolderRef mData;
 };
 
 class Str : public StrN<FASTLED_STR_INLINED_SIZE> {
