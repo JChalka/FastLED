@@ -1,4 +1,4 @@
-//TODO: Make sure bits are transposed correctly, latch out data with correct timing
+//TODO: Make sure bits are transposed correctly
 #pragma once
 
 // File copied from https://github.com/chroma-tech/micropython/blob/fern/ports/esp32/usermodules/modcanopy/driver.h#L225
@@ -15,6 +15,10 @@
 #include <hal/dma_types.h>
 #include <hal/gpio_hal.h>
 #include <soc/lcd_cam_struct.h>
+//#include <esp_lcd_io_i80.h>
+#include <esp_lcd_panel_io.h>
+
+
 
 #define FASTLED_NO_MCU
 #include <FastLED.h>
@@ -24,6 +28,7 @@
 #define COLOR_ORDER_BLUE(color_order) ((color_order) & 0x3)
 #define COLOR_ORDER_GREEN(color_order) (((color_order) >> 3) & 0x3)
 #define COLOR_ORDER_RED(color_order) (((color_order) >> 6) & 0x3)
+
 
 struct ColorOrderIndex {
   uint8_t r;
@@ -49,6 +54,83 @@ struct ColorOrderIndex {
     return out;
   }
 };
+
+
+const uint8_t manual_transpose[192] = {
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x0f, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00,
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00,
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00,
+
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00,
+
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x00, 0x0f, 
+  0x00, 0x0f, 0x0f, 
+
+  0x00, 0x00, 0x0f, 
+  0x0f, 0x0f, 0x00,
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00
+};
+
 
 static const uint16_t srgb_gamma_default[256] = {
     0,    2,    5,    7,    10,   12,   14,   17,   19,   22,   24,   26,
@@ -179,53 +261,139 @@ __attribute__((always_inline)) inline void transpose8x1(unsigned char *A,
 
   // Load the array and pack it into x and y.
   y = *(unsigned int *)(A);
+  
+  //Serial.print("y : ");
+  //Serial.print(y);
+
   x = *(unsigned int *)(A + 4);
 
+  //Serial.print(" x : ");
+  //Serial.print(x);
+
   // pre-transform x
+
+  //Serial.print(" x pre-transform : ");
+
   t = (x ^ (x >> 7)) & 0x00AA00AA;
+  //Serial.print(" x : ");
+  //Serial.print(t);
+
   x = x ^ t ^ (t << 7);
+
+  //Serial.print(" x : ");
+  //Serial.print(x);
+
   t = (x ^ (x >> 14)) & 0x0000CCCC;
+
+  //Serial.print(" x : ");
+  //Serial.print(t);
+
   x = x ^ t ^ (t << 14);
 
+  //Serial.print(" x : ");
+  //Serial.print(x);
+
   // pre-transform y
+
+  //Serial.print(" y pre-transform : ");
+
   t = (y ^ (y >> 7)) & 0x00AA00AA;
+
+  //Serial.print(" y : ");
+  //Serial.print(t);
+
   y = y ^ t ^ (t << 7);
+
+  //Serial.print(" y : ");
+  //Serial.print(y);
+
   t = (y ^ (y >> 14)) & 0x0000CCCC;
+
+  //Serial.print(" y : ");
+  //Serial.print(t);
+
   y = y ^ t ^ (t << 14);
 
+  //Serial.print(" y : ");
+  //Serial.print(y);
+
   // final transform
+
+  //Serial.print(" Final Transform : ");
   t = (x & 0xF0F0F0F0) | ((y >> 4) & 0x0F0F0F0F);
+
+  //Serial.print(" t : ");
+  //Serial.print(t);
+
   y = ((x << 4) & 0xF0F0F0F0) | (y & 0x0F0F0F0F);
+
+  //Serial.print(" y : ");
+  //Serial.print(y);
+
   x = t;
 
+  //Serial.print(" x : ");
+  //Serial.print(x);
+  //Serial.println();
+
   B[7] = y;
+
+  //Serial.print(" B[7] : ");
+  //Serial.print(B[7]);
+
   y >>= 8;
   B[6] = y;
+
+  //Serial.print(" B[6] : ");
+  //Serial.print(B[6]);
+
   y >>= 8;
   B[5] = y;
+
+  //Serial.print(" B[5] : ");
+  //Serial.print(B[5]);
+
   y >>= 8;
   B[4] = y;
 
+  //Serial.print(" B[4] : ");
+  //Serial.print(B[4]);  
+
   B[3] = x;
+
+  //Serial.print(" B[3] : ");
+  //Serial.print(B[3]);
+
   x >>= 8;
   B[2] = x;
+
+  //Serial.print(" B[2] : ");
+  //Serial.print(B[2]);
+
   x >>= 8;
   B[1] = x;
+
+  //Serial.print(" B[1] : ");
+  //Serial.print(B[1]);
+
   x >>= 8;
   B[0] = x;
+
+  /*Serial.print(" B[0] : ");
+  Serial.print(B[0]);
+  Serial.println();*/
 }
+
 
 //-----------------------------------------------------------------------------
 // Clockless driver
 //-----------------------------------------------------------------------------
 
-// hardcode these for now, until we have RGBW support
-// const uint16_t bytes_per_pixel = 3;
-// const uint16_t max_strips = 8;
-const uint32_t minimum_delay_between_frames_us = 350;
+const uint32_t minimum_delay_between_frames_us = 300;
 
-template <uint16_t max_strips, uint16_t bytes_per_pixel, uint16_t num_shift_registers>
+template <uint16_t max_strips, uint16_t bytes_per_pixel>
 class S3ClocklessShiftDriver {
+  uint16_t num_shift_registers;
   uint16_t num_strips;
   uint16_t leds_per_strip;
   uint16_t latch_pin;
@@ -247,22 +415,25 @@ public:
   S3ClocklessShiftDriver() {}
   ~S3ClocklessShiftDriver() { end(); }
 
-  bool begin(const int *pins, const int latch_pin, const int clock_pin, uint16_t num_strips, uint16_t leds_per_strip) {
+  bool begin_parallel8(const int *pins, const int latch_pin, const int clock_pin, uint16_t num_shift_registers ,uint16_t num_strips, uint16_t leds_per_strip) {
     if (num_strips == 0 || num_strips > 8) {
       ESP_LOGE("leds", "Invalid number of strips");
       return false;
     }
 
+    this->num_shift_registers = num_shift_registers;
     this->num_strips = num_strips;
     this->leds_per_strip = leds_per_strip;
     this->latch_pin = latch_pin;
     this->clock_pin = clock_pin;
     // we always transfer enough bytes for max strips, even if we're only using
-    // fewer than max
-    uint32_t xfer_size = num_shift_registers * max_strips * leds_per_strip * bytes_per_pixel * 3;
+    // fewer than max    max shift registers = 8
+    uint32_t xfer_size = 8 * max_strips * leds_per_strip * bytes_per_pixel * 3 + 4624;
+    
     uint32_t buf_size = xfer_size + 3;
     int num_desc = (xfer_size + DMA_DESCRIPTOR_BUFFER_MAX_SIZE - 1) /
                    DMA_DESCRIPTOR_BUFFER_MAX_SIZE;
+    Serial.println(num_desc , DEC);
     uint32_t alloc_size = num_desc * sizeof(dma_descriptor_t) + buf_size;
 
     alloc_addr = (uint8_t *)heap_caps_malloc(alloc_size,
@@ -278,9 +449,12 @@ public:
                     ~3);
 
     // LCD_CAM isn't enabled by default -- MUST begin with this:
+  
     periph_module_enable(PERIPH_LCD_CAM_MODULE);
     periph_module_reset(PERIPH_LCD_CAM_MODULE);
 
+
+  
     // Reset LCD bus
     LCD_CAM.lcd_user.lcd_reset = 1;
     esp_rom_delay_us(100);
@@ -288,9 +462,9 @@ public:
     // Configure LCD clock
     LCD_CAM.lcd_clock.clk_en = 1;             // Enable clock
     LCD_CAM.lcd_clock.lcd_clk_sel = 2;        // PLL240M source
-    LCD_CAM.lcd_clock.lcd_clkm_div_a = 4;     //     240 /
-    LCD_CAM.lcd_clock.lcd_clkm_div_b = 10;    // (10 + 10 / 4)
-    LCD_CAM.lcd_clock.lcd_clkm_div_num = 10;  // = 19.2MHz CLK
+    LCD_CAM.lcd_clock.lcd_clkm_div_a = 1;     //     240 /     
+    LCD_CAM.lcd_clock.lcd_clkm_div_b = 1;     // (num + div_b / div_a)
+    LCD_CAM.lcd_clock.lcd_clkm_div_num = 9;   // = 24MHz / 24 = 1mhz clock for WS28xx, ~1.25x overclock
     LCD_CAM.lcd_clock.lcd_ck_out_edge = 0;    // PCLK low in 1st half cycle
     LCD_CAM.lcd_clock.lcd_ck_idle_edge = 0;   // PCLK low idle
     LCD_CAM.lcd_clock.lcd_clk_equ_sysclk = 1; // PCLK = CLK (ignore CLKCNT_N)
@@ -307,6 +481,7 @@ public:
     LCD_CAM.lcd_user.lcd_dummy = 1;          // Dummy phase(s) @ LCD start
     LCD_CAM.lcd_user.lcd_dummy_cyclelen = 0; // 1 dummy phase
     LCD_CAM.lcd_user.lcd_cmd = 0;            // No command at LCD start
+    
     // Dummy phase(s) MUST be enabled for DMA to trigger reliably.
 
     const uint8_t mux[] = {
@@ -318,17 +493,23 @@ public:
     // Route LCD signals to GPIO pins
     for (int i = 0; i < num_shift_registers; i++) {
       if (pins[i] >= 0) {
+        //pinMode(pins[i],OUTPUT);
         esp_rom_gpio_connect_out_signal(pins[i], mux[i], false, false);
         gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pins[i]], PIN_FUNC_GPIO);
         // gpio_set_drive_capability((gpio_num_t)pins[i], (gpio_drive_cap_t)3);
+
       }
     }
-        esp_rom_gpio_connect_out_signal(clock_pin, LCD_PCLK_IDX, false, false);
-        gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[clock_pin], PIN_FUNC_GPIO);
-        gpio_set_drive_capability((gpio_num_t)clock_pin, (gpio_drive_cap_t)3);
+    //pinMode(latch_pin,OUTPUT);
+    esp_rom_gpio_connect_out_signal(latch_pin, LCD_DATA_OUT7_IDX, false, false);
+    gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[latch_pin], PIN_FUNC_GPIO);
+    gpio_set_drive_capability((gpio_num_t)latch_pin, (gpio_drive_cap_t)3);
 
-        pinMode(latch_pin, OUTPUT);
-        gpio_set_drive_capability((gpio_num_t)latch_pin, (gpio_drive_cap_t)3);
+    esp_rom_gpio_connect_out_signal(clock_pin, LCD_PCLK_IDX, false, false);
+    gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[clock_pin], PIN_FUNC_GPIO);
+    gpio_set_drive_capability((gpio_num_t)clock_pin, (gpio_drive_cap_t)3);
+
+
 
 
 
@@ -346,9 +527,10 @@ public:
       dma_desc[i].next = &dma_desc[i + 1];
       dma_desc[i].dw0.size = dma_desc[i].dw0.length = bytesThisPass;
       dma_desc[i].buffer = &dma_buf[offset];
-
+      Serial.println(offset);
       bytesToGo -= bytesThisPass;
       offset += bytesThisPass;
+      
     }
     dma_desc[num_desc - 1].dw0.suc_eof = 1;
     dma_desc[num_desc - 1].next = NULL;
@@ -379,21 +561,23 @@ public:
 
   void stage(CRGB *leds, CRGBOut &out) {
     // we process & transpose one pixel at a time * max_strips * num_shift_registers
-    uint16_t packed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
-    uint16_t transposed[bytes_per_pixel * max_strips * num_shift_registers] = {0};
+    uint8_t packed[bytes_per_pixel * max_strips * 8 ] = {0};
+    uint8_t transposed[bytes_per_pixel * max_strips * 8 ] = {0};
 
     uint8_t *output = dma_buf;
+    //Serial.println(sizeof(output)/sizeof(output[0]));
     
-      for (int i = 0; i < leds_per_strip; i++) { 
-        for (int k = 0; k < num_shift_registers; k++) {
-          for (int j = 0; j < num_strips; j++) {
+    int led = 0;
+    for (int i = 0; i < leds_per_strip; i++) {
+      for (int k = 0; k < num_shift_registers; k++) { 
+        for (int j = 0; j < num_strips; j++) {
 
           // color order, gamma, brightness
             //Serial.println("entered pixel loop");
             //CRGB *p = &(leds)[ i + j * leds_per_strip)];
             CRGB *p = &(leds)[(i + j * leds_per_strip) + (leds_per_strip * num_strips * k)];
-            Serial.print("led #: ");
-            Serial.println((i + j * leds_per_strip) + (leds_per_strip * num_strips * k));
+            //Serial.print("led #: ");
+            //Serial.println((i + j * leds_per_strip) + (leds_per_strip * num_strips * k));
             /*Serial.print(" Strip #: ");
             Serial.print(j);
             Serial.print(" Shift Register #: ");
@@ -404,9 +588,9 @@ public:
             packed[j + 8] = pixel.raw[1];
             packed[j + 16] = pixel.raw[2];*/
 
-            packed[j + 0 + (24 * k)] = pixel.raw[0];
-            packed[j + 8 + (24 * k)] = pixel.raw[1];
-            packed[j + 16 + (24 * k)] = pixel.raw[2];
+            packed[j + 0 + (num_strips * bytes_per_pixel * k)] = pixel.raw[0];
+            packed[j + 8 + (num_strips * bytes_per_pixel * k)] = pixel.raw[1];
+            packed[j + 16 + (num_strips * bytes_per_pixel * k)] = pixel.raw[2];
 
             //Serial.print("Packed: ");
 
@@ -430,44 +614,104 @@ public:
             //packed[j + 0] = pixel.raw[0];
             //packed[j + 8] = pixel.raw[1];
             //packed[j + 16] = pixel.raw[2];
+            led++;
+            //Serial.println(led);
           }
-        }
 
-        // transpose
-        for (int i = 0; i < bytes_per_pixel; i++) {
-          transpose8x1((unsigned char *)(packed + 8 * i),
-                      (unsigned char *)(transposed + 8 * i));
-        }
-
+         // Serial.println(sizeof(packed)/sizeof(packed[0]));
+          
+          // transpose
+          for (int i = 0; i < bytes_per_pixel; i++) {
+            transpose8x1((unsigned char *)(packed + 8 * i + (num_strips * bytes_per_pixel * k)),
+                        (unsigned char *)(transposed + 8 * i + (num_strips * bytes_per_pixel * k)));
+          }
+          
+      }
         // copy to DMA buffer
-        Serial.println(" packed / transposed: ");
-        for (int i = 0; i < bytes_per_pixel * (max_strips * num_shift_registers); i++, output += 3) {
 
-          output[0] = 0xFF;
-          output[1] = transposed[i];
+        for (int i = 0; i < bytes_per_pixel * (max_strips * 8); i +=8, output += 27) {
+
+          output[0] = 0x0F;
+          //output[1] = transposed[i];
+          output[1] = manual_transpose[i];
           output[2] = 0x00;
 
-          if ((i + 1) % 3 == 0 && i != 0) {
-            Serial.print(packed[i-2], BIN);
-            Serial.print(packed[i-1], BIN);
-            Serial.print(packed[i], BIN);
+          output[3] = 0x0F;
+          //output[1] = transposed[i+1];
+          output[4] = manual_transpose[i+1];
+          output[5] = 0x00;
 
-            Serial.print(" / ");
+          output[6] = 0x0F;
+          //output[1] = transposed[i+2];
+          output[7] = manual_transpose[i+2];
+          output[8] = 0x80; // latch
+          output[9] = 0x00;
 
-            Serial.print(transposed[i-2], BIN);
-            Serial.print(transposed[i-1], BIN);
-            Serial.print(transposed[i], BIN);
+          output[10] = 0x0F;
+          //output[1] = transposed[i+3];
+          output[11] = manual_transpose[i+3];
+          output[12] = 0x00;
 
-            Serial.print(" i: ");
-            Serial.print(i, DEC);
-            Serial.println();
+          output[13] = 0x0F;
+          //output[1] = transposed[i+4];
+          output[14] = manual_transpose[i+4];
+          output[15] = 0x00;
+
+          output[16] = 0x0F;
+          output[17] = 0x80; // latch
+          //output[1] = transposed[i+5];
+          output[18] = manual_transpose[i+5];
+        
+          output[19] = 0x00;
+
+          output[20] = 0x0F;
+          //output[1] = transposed[i+6];
+          output[21] = manual_transpose[i+6];
+          output[22] = 0x00;
+
+          output[23] = 0x0F;
+          //output[1] = transposed[i+7];
+          output[24] = manual_transpose[i+7];
+          output[25] = 0x00;
+          output[26] = 0x80; // latch
+
+          if (led == leds_per_strip*num_strips*num_shift_registers) {
+            //Serial.println(led);
+            output[27] = 0x00; // if data is done being transmitted before all data can be
+            output[28] = 0x00; // latched from the shift register it will keep those outputs
+            output[29] = 0x00; // high if the clock idles (eg, using delay()), sending more 
+            output[30] = 0x00; // data without filling that part of the buffer results in garbage data 
+            output[31] = 0x00; // (verfied with logic analyzer), fill tail end of buffer with 0s 
+            output[32] = 0x00; // to not accidentally trigger the latch causing unexpected results. 
+            output[33] = 0x00;
+            output[34] = 0x40;
+            output[35] = 0x00;
+            output[36] = 0x00;
+            output[37] = 0x00;
+            output[38] = 0x00;
+            output[39] = 0x00;
+            output[40] = 0x00;
+            output[41] = 0x00;
+            output[42] = 0x00;
+            output[43] = 0x00;
+            output[44] = 0x00;
+            output[45] = 0x00;
+            output[46] = 0x00;
+            output[47] = 0x00;
+            output[48] = 0x00;
+            output[49] = 0x00;
+            output[50] = 0x00;
+            output[51] = 0x00;
+            output[52] = 0x00;
+            output[53] = 0x00;
+            output[54] = 0x00;
 
           }
 
         }
-        Serial.println();
-      }
-    
+
+    }
+  
   }
   
   void show(CRGB *leds, CRGBOut &out) {
@@ -475,9 +719,11 @@ public:
     xSemaphoreTake(xRenderSemaphore, portMAX_DELAY);
 
     gdma_reset(dma_chan);
+    
     LCD_CAM.lcd_user.lcd_dout = 1;
     LCD_CAM.lcd_user.lcd_update = 1;
     LCD_CAM.lcd_misc.lcd_afifo_reset = 1;
+
 
     stage(leds, out);
 
@@ -488,10 +734,12 @@ public:
     }
 
     // kick it off
-
+    //Serial.println("gdma start");
     gdma_start(dma_chan, (intptr_t)&dma_desc[0]);
     esp_rom_delay_us(1);
     LCD_CAM.lcd_user.lcd_start = 1;
+    //Serial.println("lcd start");
+    //LCD_CAM.lcd_cmd_val.lcd_cmd_value = 0xff0;
 
   }
 
@@ -509,8 +757,8 @@ public:
   }
 };
 
-template <uint16_t max_strips, uint16_t bytes_per_pixel, uint16_t num_shift_registers>
-IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel, num_shift_registers>::dma_callback(
+template <uint16_t max_strips, uint16_t bytes_per_pixel>
+IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel>::dma_callback(
     gdma_channel_handle_t dma_chan, gdma_event_data_t *event_data,
     void *user_data) {
   S3ClocklessShiftDriver *_this = (S3ClocklessShiftDriver *)user_data;
@@ -521,9 +769,10 @@ IRAM_ATTR bool S3ClocklessShiftDriver<max_strips, bytes_per_pixel, num_shift_reg
   // empirically, not science...may need to increase if last-pixel trouble.
   esp_rom_delay_us(5);
   LCD_CAM.lcd_user.lcd_start = 0;
-
+  //Serial.println("dma callback");
   _this->show_ended_us = micros();
-
+  //gpio_set_level((gpio_num_t)_this->latch_pin,HIGH);
+  //gpio_set_level((gpio_num_t)_this->latch_pin,LOW);
   portBASE_TYPE HPTaskAwoken = 0;
   xSemaphoreGiveFromISR(_this->xRenderSemaphore, &HPTaskAwoken);
   if (HPTaskAwoken == pdTRUE) {
