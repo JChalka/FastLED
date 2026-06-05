@@ -11,9 +11,10 @@ construction, the skip-setup branch, and the actual ``meson setup`` call.
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, cast
+from typing import NamedTuple, Optional, cast
 
 from running_process import RunningProcess
 
@@ -321,6 +322,124 @@ def handle_skip_meson_setup(
     _enforce_strict_path_violations(build_dir)
 
 
+# FastLED's full set of meson.build files, relative to the source dir
+# (the project root). Listed explicitly so the wrapper can be invoked
+# with `--no-walk` and avoid the recursive `--source-dir` traversal
+# whose dominant cost was walking `.venv/` (~100k Python files, ~5s
+# cold-with-cache). Keep this list in sync with `find . -name meson.build`
+# (excluding scratch/worktree copies). See zackees/zccache#659.
+FASTLED_MESON_BUILD_FILES: tuple[str, ...] = (
+    "meson.build",
+    "tests/meson.build",
+    "tests/profile/meson.build",
+    "examples/meson.build",
+    "ci/meson/native/meson.build",
+    "ci/meson/shared/meson.build",
+    "ci/meson/wasm/meson.build",
+)
+
+
+class ZccacheCapability(NamedTuple):
+    """Result of probing the venv zccache binary.
+
+    ``path`` — absolute path to the binary.
+    ``supports_no_walk`` — True when the binary's ``meson configure``
+    subcommand accepts ``--no-walk`` (zccache 1.11.14+,
+    zackees/zccache#660). Older wrappers (1.11.12 / 1.11.13) still work,
+    they just walk ``--source-dir`` and pay the directory-traversal cost
+    on every invocation.
+    """
+
+    path: Path
+    supports_no_walk: bool
+
+
+def _get_zccache_meson_configure_path() -> Optional[ZccacheCapability]:
+    """Resolve the venv zccache binary IF it supports `meson configure`.
+
+    Returns a ``ZccacheCapability`` only when the binary is found and is
+    recent enough to ship the configure-cache wrapper (zccache 1.11.12+,
+    zackees/zccache#649). Returns ``None`` otherwise so the caller falls
+    back to a plain ``meson setup`` invocation.
+
+    Detection is intentionally cheap: we don't parse the version string —
+    instead we read ``zccache meson configure --help`` and look for the
+    wrapper's docstring (any wrapper-equipped binary) plus the ``--no-walk``
+    flag name (1.11.14+). That sidesteps the upgrade window where the
+    binary is installed but predates a flag we want to use.
+    """
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent.parent
+    is_windows = sys.platform.startswith("win") or os.name == "nt"
+    venv_zccache = (
+        project_root
+        / ".venv"
+        / "Scripts"
+        / ("zccache.exe" if is_windows else "zccache")
+    )
+    if not venv_zccache.exists():
+        return None
+    try:
+        # Cheap probe: ask zccache to describe its meson configure subcommand.
+        # The wrapper-equipped binary prints "Cache-aware `meson setup`..." at
+        # the top; a passthrough binary forwards to real meson which prints
+        # "usage: meson [-h]..." instead.
+        result = subprocess.run(
+            [str(venv_zccache), "meson", "configure", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except KeyboardInterrupt as ki:
+        handle_keyboard_interrupt(ki)
+        raise ki
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if "Cache-aware" not in result.stdout:
+        return None
+    return ZccacheCapability(
+        path=venv_zccache,
+        supports_no_walk="--no-walk" in result.stdout,
+    )
+
+
+def _write_zccache_input_sidecar(
+    *,
+    build_dir: Path,
+    build_mode: str,
+    source_hashes: "SourceHashes",
+) -> Optional[Path]:
+    """Persist FastLED's source/test/example hashes to a sidecar file the
+    zccache configure-cache wrapper can hash via ``--input-file``.
+
+    The sidecar lives in ``build_dir.parent`` (typically ``.build/``) so
+    it survives ``bash test --clean`` (which wipes the inner build dir
+    but leaves ``.build/`` intact). The per-build-mode suffix prevents
+    cross-mode cache pollution. Returns the sidecar path on success or
+    ``None`` if the parent isn't writable (in which case the caller
+    falls back to the non-input-file wrapper invocation).
+    """
+    sidecar_dir = build_dir.parent
+    try:
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    sidecar = sidecar_dir / f".zccache-meson-inputs-{build_mode}.hash"
+    payload = "\n".join(
+        [
+            f"src={source_hashes.src_hash}",
+            f"test={source_hashes.test_hash}",
+            f"source={source_hashes.source_hash}",
+        ]
+    )
+    try:
+        sidecar.write_text(payload, encoding="utf-8")
+    except OSError:
+        return None
+    return sidecar
+
+
 def build_meson_setup_cmd(
     *,
     native_file_path: Path,
@@ -329,24 +448,84 @@ def build_meson_setup_cmd(
     enable_examples: bool,
     enable_unit_tests: bool,
     reconfigure: bool,
+    source_hashes: Optional["SourceHashes"] = None,
 ) -> list[str]:
-    """Build the ``meson setup [--reconfigure] ...`` command list."""
-    cmd: list[str] = [
-        get_meson_executable(),
-        "setup",
+    """Build the ``meson setup [--reconfigure] ...`` command list.
+
+    When the venv ships a zccache (>= 1.11.13) that supports the
+    ``meson configure`` wrapper (zackees/zccache#649) plus ``--input-file``
+    (zackees/zccache#655, closes zackees/zccache#654), route the
+    invocation through that wrapper AND extend the cache key with a
+    sidecar file containing FastLED's source/test/example hashes. The
+    sidecar lets the wrapper correctly invalidate the cached configure
+    tree when those globs change — so the reconfigure path also benefits
+    from cache restoration instead of having to bypass the wrapper.
+
+    When the wrapper is 1.11.14+ (zackees/zccache#660), pass ``--no-walk``
+    plus an explicit ``--input-file`` for each of FastLED's known
+    meson.build paths (see ``FASTLED_MESON_BUILD_FILES``). This skips
+    the wrapper's recursive ``--source-dir`` walk entirely — that walk
+    was dominated by ``.venv/`` traversal (~100k Python files, ~5s on
+    cold-with-cache) and is pure overhead given we already enumerate
+    the input set.
+
+    When ``source_hashes`` is unavailable (caller didn't supply, or
+    sidecar write failed), the reconfigure path falls back to a direct
+    ``meson setup --reconfigure`` invocation. The non-reconfigure path
+    still uses the wrapper without the sidecar (the wrapper hashes
+    meson.build either way, which is stable for non-source-trigger
+    configures).
+    """
+    meson_exe = get_meson_executable()
+    meson_args: list[str] = [
+        "--native-file",
+        str(native_file_path),
+        f"-Dbuild_mode={build_mode}",
+        f"-Denable_examples={str(enable_examples).lower()}",
+        f"-Denable_unit_tests={str(enable_unit_tests).lower()}",
     ]
+
+    capability = _get_zccache_meson_configure_path()
+    sidecar: Optional[Path] = None
+    if capability is not None and source_hashes is not None:
+        sidecar = _write_zccache_input_sidecar(
+            build_dir=build_dir,
+            build_mode=build_mode,
+            source_hashes=source_hashes,
+        )
+
+    # Wrapper path: requires zccache+wrapper. The sidecar is OPTIONAL —
+    # without it, the wrapper still works but only invalidates on
+    # meson.build changes, so we keep the old reconfigure-bypass guard
+    # to avoid stale-tree hits on source-trigger reconfigures.
+    if capability is not None and (sidecar is not None or not reconfigure):
+        wrapped: list[str] = [
+            str(capability.path),
+            "meson",
+            "configure",
+            "--source-dir",
+            ".",
+            "--build-dir",
+            str(build_dir),
+            "--meson-bin",
+            meson_exe,
+        ]
+        if capability.supports_no_walk:
+            # 1.11.14+: skip the recursive walk; we enumerate inputs.
+            wrapped.append("--no-walk")
+            for meson_file in FASTLED_MESON_BUILD_FILES:
+                wrapped.extend(["--input-file", meson_file])
+        if sidecar is not None:
+            wrapped.extend(["--input-file", str(sidecar)])
+        # `--` separates wrapper flags from the trailing meson args.
+        wrapped.append("--")
+        wrapped.extend(meson_args)
+        return wrapped
+
+    cmd: list[str] = [meson_exe, "setup"]
     if reconfigure:
         cmd.append("--reconfigure")
-    cmd.extend(
-        [
-            "--native-file",
-            str(native_file_path),
-            str(build_dir),
-            f"-Dbuild_mode={build_mode}",
-            f"-Denable_examples={str(enable_examples).lower()}",
-            f"-Denable_unit_tests={str(enable_unit_tests).lower()}",
-        ]
-    )
+    cmd.extend([*meson_args[:2], str(build_dir), *meson_args[2:]])
     return cmd
 
 

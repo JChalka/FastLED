@@ -45,7 +45,7 @@
     #include "platforms/stub/watchdog_stub.impl.hpp"
 #elif defined(FL_IS_ESP32)
     #include "platforms/esp/32/watchdog_esp32.impl.hpp"
-#elif defined(FL_IS_TEENSY_4X) && FL_HAS_INCLUDE(<Watchdog_t4.h>)
+#elif defined(FL_IS_TEENSY_4X) && FL_HAS_INCLUDE(<imxrt.h>)
     #include "platforms/arm/mxrt1062/watchdog_mxrt1062.impl.hpp"
 #elif (defined(FL_IS_TEENSY_3X) || defined(FL_IS_TEENSY_LC)) && FL_HAS_INCLUDE(<kinetis.h>)
     #include "platforms/arm/k20/watchdog_k20.impl.hpp"
@@ -70,3 +70,9 @@
     // The api still compiles and runs on every supported MCU.
     #include "platforms/shared/watchdog_noop.hpp"
 #endif
+
+// Platform-agnostic helpers (ResetInfo::describe(), ScopedWatchdog ctor/dtor,
+// print/delay sinks for the lazy first-init path) are emitted by
+// `src/fl/wdt/_build.cpp.hpp` — included from the regular fl/ unity build,
+// not from here. Including `.cpp.hpp` files outside the unity build is a
+// hard ban per agents/docs/cpp-standards.md.
