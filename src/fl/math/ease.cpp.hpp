@@ -353,10 +353,64 @@ using GammaKey = fl::ufixed_point<4, 12>;
 class Gamma8Impl : public Gamma8 {
 public:
     explicit Gamma8Impl(float gamma) {
+        // i=0 is mathematically exact regardless of gamma: pow(0, any) = 0.
+        // The s8x24::pow short-circuit covers exact 0 input, but we set it
+        // here directly anyway because (a) the loop below avoids the
+        // round-trip math and (b) `mLut` is otherwise uninitialized.
+        // i=255 used to need a workaround for the log2(1+t) endpoint
+        // residual; that snap is now handled inside s8x24::pow itself
+        // (see #2969).
         mLut[0] = 0;
+        // Compute the 256-entry u16 gamma LUT in fixed-point so we don't
+        // pull `__ieee754_pow` (libm, ~2.7 KB) into release builds — the
+        // double-precision pow chain dominates the top-9 bytes attributed
+        // to libm in the post-#2908 ESP32-S3 NEOPIXEL Blink audit
+        // (see #2886 / #2910).
+        //
+        // `s8x24` is 8-integer + 24-fractional bits (same 32-bit storage as
+        // s16x16, but 256× the sub-LSB resolution). Both log2_fp/exp2_fp use
+        // the same 4-term minimax polynomial, but s8x24 carries the full
+        // 24-bit intermediate precision end-to-end instead of truncating
+        // back to 16 frac bits at each stage — bringing the runtime output
+        // within ~1 LSB of true float pow() at the u16 output. Combined
+        // with the special-case for gamma=2.8 in Gamma8::getOrCreate(),
+        // this closes the divergence with the precomputed GAMMA_2_8_LUT
+        // (see #2963 audit + ucs7604 "default gamma 2.8" subcase).
+        //
+        // Bit budget check: max intermediate is exp*log2_fp(1/255) =
+        // 16 * -7.994 ≈ -127.9, fits in s8x24's signed [-128, 128) range.
+        // (GammaKey caps user gamma at 16.)
+        //
+        // libm-free: log2_fp/exp2_fp are pure integer-polynomial impls.
+        // The only float kept is the one-shot s8x24(gamma) constructor
+        // call (pulls __mulsf3 / __fixsfsi helpers, both << 100 B).
+        const fl::s8x24 gamma_fp(gamma);
+        constexpr fl::s8x24 inv_255_fp(1.0f / 255.0f);
         for (int i = 1; i < 256; ++i) {
-            double v = fl::pow(static_cast<double>(i) / 255.0, static_cast<double>(gamma)) * 65535.0;
-            mLut[i] = static_cast<u16>(fl::round(v));
+            const fl::s8x24 x = static_cast<i32>(i) * inv_255_fp;  // (0, 1]
+            const fl::s8x24 r = fl::s8x24::pow(x, gamma_fp);       // (0, 1]
+            // r.raw() is the s8x24 raw with FRAC_BITS=24, range [0, 2^24].
+            // Scale to u16 [0, 65535] with round-half-up. 24+16 bit
+            // multiplication needs a u64 intermediate:
+            //   result = ((u64)raw * 65535 + (1<<23)) >> 24
+            const fl::u64 scaled =
+                (static_cast<fl::u64>(static_cast<fl::u32>(r.raw())) * 65535ull
+                 + (1ull << 23)) >> 24;
+            mLut[i] = static_cast<u16>(scaled > 65535u ? 65535u : scaled);
+        }
+    }
+
+    // Construct a Gamma8Impl by copying a precomputed PROGMEM LUT directly
+    // into mLut. Used by Gamma8::getOrCreate(2.8f) to alias GAMMA_2_8_LUT,
+    // guaranteeing bit-identical output with fl::gamma_2_8() and skipping
+    // the runtime pow chain entirely. The `from_progmem_lut_tag` tag
+    // disambiguates from the float ctor; we can't add a ctor taking just
+    // `const u16*` because that would silently bind to integer-literal
+    // gammas (`Gamma8::getOrCreate(2)` would be a footgun).
+    struct from_progmem_lut_tag {};
+    Gamma8Impl(from_progmem_lut_tag, const u16* progmem_lut) {
+        for (int i = 0; i < 256; ++i) {
+            mLut[i] = FL_PGM_READ_WORD_ALIGNED(&progmem_lut[i]);
         }
     }
 
@@ -403,21 +457,63 @@ private:
 };
 
 fl::shared_ptr<const Gamma8> Gamma8::getOrCreate(float gamma) {
-    GammaKey key(gamma);
+    // Clamp gamma to the cache-key domain BEFORE deriving the key and
+    // before feeding it to s8x24. `GammaKey` is `ufixed_point<4, 12>`,
+    // so its representable range is [0, ~16). A negative input would
+    // wrap unsigned in the GammaKey ctor; an input ≥ 16 would either
+    // saturate or wrap. Clamping up-front also keeps the s8x24 bit
+    // budget safe: `exp * log2_fp(1/255) ≈ -7.994 * gamma` must stay
+    // within s8x24's signed [-128, 128) integer range — gamma ≤ 16
+    // gives -127.9, right at the edge.
+    constexpr float kGammaMax = 15.99975f;  // just under 4.12 ufixed max
+    const float gamma_clamped = (gamma < 0.0f)         ? 0.0f
+                                : (gamma > kGammaMax)  ? kGammaMax
+                                                       : gamma;
+    GammaKey key(gamma_clamped);
 
-    static fl::flat_map<GammaKey, fl::weak_ptr<const Gamma8>> sCache;
+    // Fast path: gamma 2.8 is the canonical default (every legacy
+    // `addLeds<NEOPIXEL>` flow, every WS281x chipset). We have a
+    // precomputed `GAMMA_2_8_LUT` already in .rodata (used by the
+    // free function `fl::gamma_2_8`). Construct a Gamma8 instance
+    // that copies that table directly instead of recomputing 256
+    // fixed-point pow operations (which would diverge from the
+    // precomputed values by ~30-50 LSB). Cached via weak_ptr to
+    // match the documented `getOrCreate` lifetime contract — the
+    // instance disappears once all callers drop their shared_ptr,
+    // and the next call rebuilds it.
+    constexpr GammaKey k28(2.8f);
+    if (key == k28) {
+        static fl::weak_ptr<const Gamma8> s28_weak;
+        if (auto existing = s28_weak.lock()) {
+            return existing;
+        }
+        auto ptr = fl::make_shared<Gamma8Impl>(
+            Gamma8Impl::from_progmem_lut_tag{}, GAMMA_2_8_LUT);
+        s28_weak = ptr;
+        return ptr;
+    }
 
-    auto it = sCache.find(key);
-    if (it != sCache.end()) {
-        fl::shared_ptr<const Gamma8> existing = it->second.lock();
-        if (existing) {
+    // Slow path: arbitrary gamma. Single-entry weak_ptr cache. Users
+    // who switch gamma values at runtime pay one extra `Gamma8Impl`
+    // reconstruction per switch (256 fixed-point pow operations +
+    // ~512 B alloc). See #2928 / #2886.
+    static GammaKey sCachedKey{};
+    static fl::weak_ptr<const Gamma8> sCachedPtr;
+    static bool sCacheValid = false;
+
+    if (sCacheValid && key == sCachedKey) {
+        if (auto existing = sCachedPtr.lock()) {
             return existing;
         }
     }
 
+    // Use the clamped gamma so the LUT we build matches the cache key
+    // (otherwise out-of-range inputs would keep missing the cache).
     fl::shared_ptr<const Gamma8> ptr =
-        fl::make_shared<Gamma8Impl>(gamma);
-    sCache[key] = ptr;
+        fl::make_shared<Gamma8Impl>(gamma_clamped);
+    sCachedKey = key;
+    sCachedPtr = ptr;
+    sCacheValid = true;
     return ptr;
 }
 

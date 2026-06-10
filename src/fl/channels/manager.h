@@ -30,6 +30,7 @@
 #include "fl/stl/vector.h"
 #include "fl/stl/shared_ptr.h"
 #include "fl/stl/noexcept.h"
+#include "platforms/channel_poll_signal.h"
 
 namespace fl {
 
@@ -161,6 +162,32 @@ public:
     /// @return true if enabled, false if disabled or not registered
     bool isDriverEnabled(const char* name) const FL_NOEXCEPT;
 
+    /// @brief Registration status of a driver by name (silent lookup)
+    /// @note Values are prefixed (`STATUS_*`) because Arduino-ESP32's
+    ///       `esp32-hal-gpio.h` defines `#define DISABLED 0x00` for pinMode
+    ///       and would textually rewrite the unprefixed labels at every call
+    ///       site (`DriverStatus::DISABLED` -> `DriverStatus::0x00`).
+    enum class DriverStatus {
+        NOT_REGISTERED,    ///< No driver with that name is registered
+        STATUS_DISABLED,   ///< Driver is registered but disabled
+        STATUS_ENABLED,    ///< Driver is registered and enabled
+    };
+
+    /// @brief Look up a driver's registration status without logging on miss.
+    /// @param name Driver name (case-sensitive)
+    /// @return DriverStatus tri-state (NOT_REGISTERED / STATUS_DISABLED / STATUS_ENABLED)
+    /// @note Companion to `findDriverByName()` — same silent-on-miss behavior.
+    ///       Used by `Channel::showPixels()` to detect the #2517 silent-drop
+    ///       case (enqueued data routed to a disabled / unregistered driver).
+    DriverStatus driverStatus(const fl::string& name) const FL_NOEXCEPT;
+
+    /// @brief Get the currently-active exclusive-driver selection (if any).
+    /// @return Driver name set via `setExclusiveDriver(...)`, or empty string
+    ///         if no exclusive mode is active.
+    /// @note Diagnostic accessor — used by the #2517 silent-drop FL_ERROR to
+    ///       name the current exclusive-driver setting in its remediation hint.
+    const fl::string& exclusiveDriverName() const FL_NOEXCEPT { return mExclusiveDriver; }
+
     /// @brief Get count of registered drivers (including unnamed ones)
     /// @return Total number of registered drivers
     fl::size getDriverCount() const FL_NOEXCEPT;
@@ -228,6 +255,11 @@ private:
     template<typename Condition>
     bool waitForCondition(Condition condition, u32 timeoutMs = 1000) FL_NOEXCEPT;
 
+    void notifyPollNeeded() FL_NOEXCEPT;
+    bool waitForPollNeededSignal(u32 timeoutMs) FL_NOEXCEPT;
+    u32 pollNeededWaitSliceMs(u32 startTime, u32 timeoutMs) const FL_NOEXCEPT;
+    static void notifyPollNeededThunk(void* context) FL_NOEXCEPT;
+
 private:
     /// @brief Engine registry entry (priority + shared pointer + runtime control)
     struct EngineEntry {
@@ -262,6 +294,12 @@ private:
     /// @note When non-empty, new drivers are auto-disabled if name doesn't match.
     ///       Set by `setExclusiveDriverByName()` / cleared on empty name.
     fl::string mExclusiveDriver;
+
+    /// @brief Shared callback installed on drivers that can signal poll-needed events.
+    IChannelDriver::PollNeededCallback mPollNeededCallback;
+
+    /// @brief Platform wait primitive owned by the manager.
+    platforms::ChannelPollSignal mPollNeededSignal;
 
     // Non-copyable, non-movable
     ChannelManager(const ChannelManager&) FL_NOEXCEPT = delete;

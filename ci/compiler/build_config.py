@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from running_process import EndOfStream, RunningProcess
 
@@ -28,6 +28,138 @@ def _get_project_root() -> Path:
 
         _PROJECT_ROOT = resolve_project_root()
     return _PROJECT_ROOT
+
+
+def get_root_platformio_build_flags(board_name: str, project_root: Path) -> list[str]:
+    """Read the root ``platformio.ini`` and return ``build_flags`` for the
+    matching ``[env:<board_name>]`` section, with ``extends`` and ``[env]``
+    inheritance resolved.
+
+    This exists to fix issue #2664: ``bash compile --backend platformio``
+    synthesises a fresh PIO project at ``.build/pio/<env>/platformio.ini``
+    from ``ci/boards.py`` and was silently discarding ``build_flags`` defined
+    in the user's root ``platformio.ini``. Anyone editing the root file
+    reasonably expects those flags to take effect; without this merge step
+    they vanish, producing subtle "flags work under fbuild but not under
+    --backend=platformio" bugs.
+
+    Behaviour:
+    - Returns an empty list if the root ``platformio.ini`` is missing,
+      malformed, or has no matching ``[env:<board_name>]`` section.
+    - Substitution variables like ``${env:generic-esp.build_flags}`` and
+      ``extends = env:generic-esp`` are resolved using the existing
+      :class:`PlatformIOIni` parser, which already implements PlatformIO's
+      inheritance semantics.
+    - Never raises: parse errors are swallowed and logged so that a broken
+      root file cannot block a build.
+
+    Args:
+        board_name: The PlatformIO env name (e.g. ``"esp32c6"``). Matches
+            ``[env:<board_name>]`` in the root ini.
+        project_root: FastLED project root containing ``platformio.ini``.
+
+    Returns:
+        Ordered list of build_flags strings, or ``[]`` when nothing applies.
+    """
+    root_ini = project_root / "platformio.ini"
+    if not root_ini.exists():
+        return []
+
+    try:
+        # Local import to avoid a circular import at module load.
+        from ci.compiler.platformio_ini import PlatformIOIni
+
+        pio_ini = PlatformIOIni.parseFile(root_ini)
+        parsed = pio_ini.parsed
+        env = parsed.environments.get(board_name)
+        if env is None:
+            return []
+        # `parsed` already has extends + [env] inheritance applied, and
+        # ${env:...} substitutions resolved (see _resolve_list_variables in
+        # ci/compiler/platformio_ini.py).
+        return list(env.build_flags)
+    except KeyboardInterrupt as ki:
+        handle_keyboard_interrupt(ki)
+        raise
+    except Exception as e:
+        # Never let a malformed root platformio.ini block a build.
+        print(
+            f"Warning: failed to read root platformio.ini for env '{board_name}': {e}"
+        )
+        return []
+
+
+def _override_prog_path_for_fbuild(
+    build_dir: Path, data: dict[str, dict[str, Any]], board: "Board"
+) -> None:
+    """If fbuild produced a fresher ELF than PlatformIO's `prog_path`,
+    rewrite the path to point at the fbuild artifact so symbol/size
+    analysis reads the build we just produced — not whatever an older
+    `pio run` left in `.pio/build/<env>/`.
+
+    fbuild emits to `.fbuild/build/<env>/<release|debug>/firmware.elf`,
+    where the subdir is picked by build mode (`fbuild build` defaults to
+    `release/`; `fbuild build --quick` lands in `debug/`). We probe both
+    candidates and pick whichever ELF is newer — that way `--quick`
+    builds get the same staleness override the default mode does.
+
+    No-op when the fbuild directory is absent (pure PlatformIO build),
+    when the PIO ELF is newer than all fbuild candidates (PIO was the
+    active backend), or when the metadata blob has no recognisable
+    environment entry.
+    """
+    fbuild_root = build_dir / ".fbuild" / "build"
+    if not fbuild_root.is_dir():
+        return
+
+    if not data:
+        return
+
+    env_name = board.board_name if board.board_name in data else next(iter(data), None)
+    if env_name is None:
+        return
+    env = data[env_name]
+
+    # fbuild lays out artifacts under <env>/<release|debug>/firmware.elf.
+    # `fbuild build`           -> release/
+    # `fbuild build --release` -> release/
+    # `fbuild build --quick`   -> debug/
+    # Pick whichever variant is newer so users running --quick still get
+    # a fresh staleness override (Closes #2852).
+    fbuild_elf_candidates = [
+        fbuild_root / env_name / "release" / "firmware.elf",
+        fbuild_root / env_name / "debug" / "firmware.elf",
+    ]
+    existing = [c for c in fbuild_elf_candidates if c.exists()]
+    if not existing:
+        return
+    fbuild_elf = max(existing, key=lambda p: p.stat().st_mtime)
+
+    current_prog_raw = env.get("prog_path")
+    if isinstance(current_prog_raw, str) and current_prog_raw:
+        current_prog = Path(current_prog_raw)
+        # Only override when fbuild's ELF is strictly newer (or PIO's is
+        # missing). A successful `pio run` that beats the most recent
+        # fbuild run should win.
+        if current_prog.exists():
+            try:
+                if current_prog.stat().st_mtime >= fbuild_elf.stat().st_mtime:
+                    return
+            except OSError:
+                pass
+
+    fbuild_elf_str = str(fbuild_elf.resolve())
+    env["prog_path"] = fbuild_elf_str
+    fbuild_bin = fbuild_elf.with_suffix(".bin")
+    if fbuild_bin.exists() and "prog_size" in env:
+        try:
+            env["prog_size"] = fbuild_bin.stat().st_size
+        except OSError:
+            pass
+    print(
+        f"  Pointed prog_path at fbuild artifact: {fbuild_elf_str} "
+        f"(was {current_prog_raw!r})"
+    )
 
 
 def generate_build_info_json_from_existing_build(
@@ -96,6 +228,19 @@ def generate_build_info_json_from_existing_build(
         try:
             metadata_output = "".join(metadata_lines)
             data = json.loads(metadata_output)
+
+            # When the build was driven by fbuild (which writes its ELF to
+            # `<build_dir>/.fbuild/build/<env>/release/firmware.elf`), the
+            # `prog_path` we just got from `pio project metadata` still
+            # points at the PlatformIO output path under `.pio/build/<env>/`.
+            # That `.pio/` ELF is whatever an older `pio run` left there
+            # (often empty or stale), so downstream symbol/size analysis
+            # would silently analyze the wrong binary. Detect the fresher
+            # fbuild ELF and rewrite `prog_path` to it so the consumers
+            # (ci/symbol_analysis_runner.py, ci/inspect_elf.py,
+            # ci/compiled_size.py firmware.bin fallback) see the build we
+            # just made.
+            _override_prog_path_for_fbuild(build_dir, data, board)
 
             # Add tool aliases for symbol analysis and debugging
             insert_tool_aliases(data)

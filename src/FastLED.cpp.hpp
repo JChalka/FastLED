@@ -11,7 +11,9 @@
 #include "fl/channels/manager.h"
 #include "fl/system/trace.h"
 #include "fl/channels/driver.h"  // for IChannelDriver
+#include "fl/channels/detail/wait_spin_budget.h"  // for tiered-wait spin-budget setters (#2818)
 #include "fl/system/delay.h"  // for delayMicroseconds
+#include "fl/system/yield.h"  // for fl::yield
 #include "fl/system/sketch_macros.h"
 #if SKETCH_HAS_LARGE_MEMORY
 #include "fl/task/executor.h"  // for task::run (WiFi yield in show() spin loop)
@@ -381,7 +383,7 @@ void CFastLED::delay(unsigned long ms) {
 		fl::delay(1);
 #endif
 		show();
-		yield();
+		fl::yield();
 	}
 	while((fl::millis()-start) < ms);
 }
@@ -595,6 +597,16 @@ void CFastLED::wait() {
 bool CFastLED::wait(fl::u32 timeout_ms) {
 	fl::ChannelManager& manager = fl::channelManager();
 	return manager.waitForReady(timeout_ms);
+}
+
+// Tiered-wait spin-budget shims (#2818). Storage in
+// src/fl/channels/detail/wait_spin_budget.cpp.hpp.
+void CFastLED::_setWaitSpinBudgetUs(fl::u32 budget_us) FL_NOEXCEPT {
+	fl::detail::setWaitSpinBudgetUs(budget_us);
+}
+
+fl::u32 CFastLED::_getWaitSpinBudgetUs() FL_NOEXCEPT {
+	return fl::detail::getWaitSpinBudgetUs();
 }
 
 // ============================================================================

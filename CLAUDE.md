@@ -15,6 +15,7 @@
 | Test-Driven Development (TDD) | Use `/tdd` or `/tdd-implement` skills |
 | Hardware autoresearch / `bash autoresearch` | `agents/docs/hardware-autoresearch.md` |
 | Debugging a C++ crash | `agents/docs/debugging.md` |
+| Investigating binary size / flash bloat | `agents/docs/binary-size-analysis.md` |
 | Creating a new C++ linter | `agents/docs/linter-architecture.md` |
 | Detailed command reference | `agents/docs/commands-reference.md` |
 | Workflow and task management | `agents/docs/workflow.md` |
@@ -31,6 +32,7 @@
 - `bash compile <platform> --examples Blink` — Compile for specific hardware (only when explicitly requested)
 - `bash autoresearch --parlio` — Live device testing (must specify driver)
 - `bash profile <function>` — Performance profiling
+- `bash bloat <board>` — Per-symbol flash/RAM bloat report (see `agents/docs/binary-size-analysis.md`)
 
 **NEVER use:** `uv run python test.py` — use `bash test` or `uv run test.py`
 **FORBIDDEN:** `--no-fingerprint` (use `bash test --clean`), bare `pio`/`platformio`, bare `meson`/`ninja`/`clang++`

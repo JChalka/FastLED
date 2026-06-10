@@ -14,6 +14,9 @@
 
 // Include platform-specific detection headers
 // IWYU pragma: begin_keep
+#include "lpc/is_lpc.h"
+// IWYU pragma: end_keep
+// IWYU pragma: begin_keep
 #include "nrf52/is_nrf52.h"
 // IWYU pragma: end_keep
 // IWYU pragma: begin_keep
@@ -68,6 +71,12 @@
     defined(__SAMD21E17A__) || defined(__SAMD21E18A__) || \
     /* Microchip SAMD51/SAME51 */ \
     defined(__SAMD51G19A__) || defined(__SAMD51J19A__) || \
-    defined(__SAME51J19A__) || defined(__SAMD51P19A__) || defined(__SAMD51P20A__)
+    defined(__SAME51J19A__) || defined(__SAMD51P19A__) || defined(__SAMD51P20A__) || \
+    /* NXP LPC family - defined by lpc/is_lpc.h:                          \
+     *   LPC8xx  (LPC845 / LPC804)         - Cortex-M0+, driver wired (#2837) \
+     *   LPC11xx (LPC1114/1115/U24/U35)    - Cortex-M0,  detection only (#2849) \
+     *   LPC15xx (LPC15{17..49})           - Cortex-M3,  detection only (#2859) \
+     * Driver wiring for LPC11xx / LPC15xx is tracked in #2845 Stage 4. */ \
+    defined(FL_IS_ARM_LPC)
 #define FL_IS_ARM
 #endif  // ARM platform detection

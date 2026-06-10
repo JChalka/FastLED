@@ -130,6 +130,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
     // Testing constructor: Inject peripheral
     explicit ChannelEngineRMTImpl(IRMT5Peripheral& peripheral) FL_NOEXCEPT
         : mPeripheral(peripheral),
+          mPollNeededCallback(),
           mDMAChannelsInUse(0), mAllocationFailed(false),
           mMemoryReductionOffset(0),
           mConsecutiveAllocationFailures(0), mRecoveryWarningShown(false) {
@@ -140,6 +141,15 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
     }
 
     ~ChannelEngineRMTImpl() override {
+        // The destructor body (drain-wait + per-channel cleanup loop +
+        // FL_WARN timeout diagnostic + FL_LOG_RMT trailer) is a cold path —
+        // only reached at process end. Move it into an FL_NO_INLINE helper
+        // so its operator<< instantiations + cleanup loop body don't
+        // contribute to icache footprint. #2856 item 3.1.
+        destructorCleanup();
+    }
+
+    FL_NO_INLINE void destructorCleanup() FL_NOEXCEPT {
         // Wait for all active transmissions to complete (with timeout)
         // Must wait for READY (not just !BUSY) since poll() can return DRAINING
         int timeout_iterations = 100000; // 10 seconds at 100us per iteration
@@ -150,7 +160,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
             state = poll();
         }
         if (timeout_iterations == 0) {
-            FL_WARN("ChannelEngineRMT destructor timeout - forcing cleanup");
+            FL_WARN_LIT("[RMT] ChannelEngineRMT destructor timeout - forcing cleanup");
         }
 
         // Get memory manager reference
@@ -242,7 +252,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
             activeCount++;
             anyActive = true;
 
-            if (ch.transmissionComplete) {
+            if (ch.transmissionComplete.load(fl::memory_order_acquire)) {
                 completedCount++;
                 FL_LOG_RMT("Channel on pin " << ch.pin
                                              << " completed transmission");
@@ -299,14 +309,71 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
         return state;
     }
 
+    void setPollNeededCallback(PollNeededCallback callback) FL_NOEXCEPT override {
+        mPollNeededCallback.set(callback);
+    }
+
   private:
     /// @brief RMT channel state (replaces RmtWorkerSimple)
     struct ChannelState {
+        ChannelState() FL_NOEXCEPT
+            : owner(nullptr),
+              channel(nullptr),
+              encoder(nullptr),
+              pin(0),
+              timing{},
+              transmissionComplete(false),
+              inUse(false),
+              useDMA(false),
+              reset_us(0),
+              pooledBuffer(),
+              memoryChannelId(0) {}
+
+        ChannelState(const ChannelState& other) FL_NOEXCEPT
+            : owner(other.owner),
+              channel(other.channel),
+              encoder(other.encoder),
+              pin(other.pin),
+              timing(other.timing),
+              transmissionComplete(other.transmissionComplete.load(fl::memory_order_acquire)),
+              inUse(other.inUse),
+              useDMA(other.useDMA),
+              reset_us(other.reset_us),
+              pooledBuffer(other.pooledBuffer),
+              memoryChannelId(other.memoryChannelId) {}
+
+        ChannelState& operator=(const ChannelState& other) FL_NOEXCEPT {
+            if (this != &other) {
+                owner = other.owner;
+                channel = other.channel;
+                encoder = other.encoder;
+                pin = other.pin;
+                timing = other.timing;
+                transmissionComplete.store(
+                    other.transmissionComplete.load(fl::memory_order_acquire),
+                    fl::memory_order_release);
+                inUse = other.inUse;
+                useDMA = other.useDMA;
+                reset_us = other.reset_us;
+                pooledBuffer = other.pooledBuffer;
+                memoryChannelId = other.memoryChannelId;
+            }
+            return *this;
+        }
+
+        ChannelState(ChannelState&& other) FL_NOEXCEPT
+            : ChannelState(static_cast<const ChannelState&>(other)) {}
+
+        ChannelState& operator=(ChannelState&& other) FL_NOEXCEPT {
+            return operator=(static_cast<const ChannelState&>(other));
+        }
+
+        ChannelEngineRMTImpl* owner;
         void* channel;  // Opaque channel handle (matches IRMT5Peripheral interface)
         void* encoder;  // Encoder handle from peripheral interface (prevents race conditions)
         int pin;        // GPIO pin number (platform-agnostic)
         ChipsetTiming timing;
-        volatile bool transmissionComplete;
+        fl::atomic_bool transmissionComplete;
         bool inUse;
         bool useDMA; // Whether this channel uses DMA
         u32 reset_us;
@@ -345,12 +412,15 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
             mAllocationFailed = false;
         }
 
-        // Sort: smallest strips first (helps async parallelism)
+        // Sort: smallest strips first (helps async parallelism).
+        // Container is bounded at 16 by construction (fl::vector_inlined<T, 16>),
+        // so use sort_small to avoid instantiating quicksort_impl in the
+        // ClocklessIdf5 transitive closure — see #2907.
         fl::vector_inlined<ChannelDataPtr, 16> sorted;
         for (const auto& data : channelData) {
             sorted.push_back(data);
         }
-        fl::sort(sorted.begin(), sorted.end(), [](const ChannelDataPtr& a, const ChannelDataPtr& b) FL_NOEXCEPT {
+        fl::sort_small(sorted.begin(), sorted.end(), [](const ChannelDataPtr& a, const ChannelDataPtr& b) FL_NOEXCEPT {
             return a->getSize() > b->getSize();  // Reverse order for back-to-front processing
         });
 
@@ -380,6 +450,160 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
 
     /// @brief Release a channel (marks as available for reuse)
     void releaseChannel(ChannelState *channel) FL_NOEXCEPT;
+
+    /// @brief Out-of-line diagnostic emitters (#2773 item 2.2).
+    /// Both messages are ~15 lines of multi-line literal + integer
+    /// interpolation, and live only on the cold recovery / failure paths of
+    /// createChannel. Keeping them inside createChannel bloated the function
+    /// to ~6.3 KB because every `operator<<` instantiation got inlined.
+    /// Splitting into `noinline` helpers moves those instantiations into
+    /// their own (also cold-path) functions so `--gc-sections` can keep
+    /// them tiny, and createChannel shrinks proportionally.
+    FL_NO_INLINE void emitRecoveryWarning(
+        size_t original_symbols, size_t reduced_symbols,
+        size_t external_words) FL_NOEXCEPT {
+        // Gate the entire body on FASTLED_LOG_RUNTIME_ENABLED. In release
+        // builds (NDEBUG → FASTLED_LOG_VERBOSITY=0 per Stage 1) the
+        // FL_WARN(msg.str()) call at the bottom is a no-op, but the
+        // `fl::sstream msg;` construction and 15 `operator<<` chain calls
+        // above happen unconditionally — they have observable side effects
+        // on msg's internal buffer that the optimizer can't prove away.
+        // Gating collapses the FL_NO_INLINE helper to an effectively-empty
+        // function in release (~5 B vs ~410 B). See #2917 / #2886.
+#if FASTLED_LOG_RUNTIME_ENABLED
+        fl::sstream msg;
+        msg << "\n========================================\n"
+            << "RMT ALLOCATION RECOVERY - ACTION REQUIRED\n"
+            << "========================================\n"
+            << "FastLED detected external RMT memory usage!\n"
+            << "  Expected: " << original_symbols << " symbols available\n"
+            << "  Actual: " << reduced_symbols << " symbols available\n"
+            << "  External usage: ~" << external_words << " words\n"
+            << "\n"
+            << "To prevent future recovery attempts, add this to setup():\n"
+            << "----------------------------------------\n"
+            << "  auto& rmtMgr = fl::RmtMemoryManager::instance();\n"
+            << "  rmtMgr.reserveExternalMemory(" << external_words << ", 0);\n"
+            << "----------------------------------------\n"
+            << "\n"
+            << "FastLED will continue with reduced buffer size.\n"
+            << "Performance may be degraded during WiFi/network activity.\n"
+            << "========================================";
+        FL_WARN(msg.str());
+#else
+        (void)original_symbols;
+        (void)reduced_symbols;
+        (void)external_words;
+#endif
+    }
+
+    /// @brief Cold-path recovery loop for failed initial RMT allocations.
+    /// Extracted from createChannel so the hot path (initial allocation
+    /// succeeds, which is the common case at boot) stays small. The retry
+    /// loop pulls FL_LOG_RMT/FL_WARN `fl::sstream` operator<< instantiations
+    /// and a per-iteration Rmt5ChannelConfig constructor — all of which the
+    /// linker would otherwise have to keep live inside the hot function body.
+    /// Returns true on successful recovery (caller continues to encoder
+    /// creation), false otherwise (caller returns false). Mutates
+    /// mem_block_symbols to the recovered size on success. See #2773 item 2.2.
+    FL_NO_INLINE bool attemptAllocationRecovery(
+        ChannelState *state, int pin, int intr_priority,
+        fl::size &mem_block_symbols) FL_NOEXCEPT {
+        auto &memMgr = RmtMemoryManager::instance();
+
+        FL_WARN("RMT channel allocation failed (initial request: "
+                << mem_block_symbols << " symbols)");
+        FL_WARN("Attempting progressive memory reduction recovery...");
+
+        mConsecutiveAllocationFailures++;
+        size_t original_symbols = mem_block_symbols;
+        size_t retry_count = 0;
+        const size_t min_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL; // Minimum 1 block
+        bool recovery_succeeded = false;
+        bool success = false;
+
+        // Progressively reduce memory until it works or we hit minimum.
+        // CRITICAL: mem_block_symbols MUST be a multiple of
+        // SOC_RMT_MEM_WORDS_PER_CHANNEL. Step down by whole blocks
+        // (48 symbols on ESP32-S3), not by 1 symbol.
+        for (size_t reduced_symbols = mem_block_symbols - SOC_RMT_MEM_WORDS_PER_CHANNEL;
+             reduced_symbols >= min_symbols;
+             reduced_symbols -= SOC_RMT_MEM_WORDS_PER_CHANNEL) {
+            retry_count++;
+
+            // Free previous allocation attempt
+            memMgr.free(state->memoryChannelId, true);
+
+            Rmt5ChannelConfig retry_config(pin, FASTLED_RMT5_CLOCK_HZ,
+                                            reduced_symbols, 1, false, intr_priority);
+
+            FL_LOG_RMT("Retry #" << retry_count << ": Attempting " << reduced_symbols
+                       << " symbols (reduced by " << (original_symbols - reduced_symbols) << ")");
+
+            success = mPeripheral.createTxChannel(retry_config, (void**)&state->channel);
+            if (success) {
+                mMemoryReductionOffset = original_symbols - reduced_symbols;
+                mConsecutiveAllocationFailures = 0;
+
+                size_t external_words = original_symbols - reduced_symbols;
+
+                if (!mRecoveryWarningShown) {
+                    emitRecoveryWarning(original_symbols, reduced_symbols, external_words);
+                    mRecoveryWarningShown = true;
+                }
+
+                memMgr.recordRecoveryAllocation(state->memoryChannelId, reduced_symbols, true);
+                FL_LOG_RMT("Recovery: Re-added allocation to ledger: "
+                           << reduced_symbols << " words for channel "
+                           << static_cast<int>(state->memoryChannelId));
+
+                mem_block_symbols = reduced_symbols;
+                recovery_succeeded = true;
+                break;
+            }
+        }
+
+        if (!recovery_succeeded) {
+            emitAllocationFailureError(retry_count, original_symbols,
+                                       min_symbols, static_cast<int>(pin));
+
+            state->channel = nullptr;
+            memMgr.free(state->memoryChannelId, true);
+            return false;
+        }
+
+        return true;
+    }
+
+    FL_NO_INLINE void emitAllocationFailureError(
+        size_t retry_count, size_t original_symbols, size_t min_symbols,
+        int pin) FL_NOEXCEPT {
+        // Same gating rationale as emitRecoveryWarning above — see #2917.
+#if FASTLED_LOG_RUNTIME_ENABLED
+        fl::sstream msg;
+        msg << "\n========================================\n"
+            << "RMT CHANNEL ALLOCATION FAILED\n"
+            << "========================================\n"
+            << "FastLED could not allocate RMT channel after " << retry_count << " retry attempts\n"
+            << "  Platform: " << CONFIG_IDF_TARGET << "\n"
+            << "  Requested: " << original_symbols << " symbols\n"
+            << "  Minimum attempted: " << min_symbols << " symbols\n"
+            << "\n"
+            << "Possible causes:\n"
+            << "  1. External code is using all RMT channels\n"
+            << "  2. RMT hardware failure\n"
+            << "  3. Insufficient RMT memory for platform\n"
+            << "\n"
+            << "LEDs on pin " << pin << " will NOT work!\n"
+            << "========================================";
+        FL_ERROR(msg.str());
+#else
+        (void)retry_count;
+        (void)original_symbols;
+        (void)min_symbols;
+        (void)pin;
+#endif
+    }
 
     /// @brief Create new RMT channel with given configuration
     /// @param dataSize Size of LED data in bytes (0 = use default buffer size)
@@ -420,8 +644,17 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
         // Get memory manager reference
         auto &memMgr = RmtMemoryManager::instance();
 
-        // Get current Network state for memory allocation
+        // Get current Network state for memory allocation.
+        // Under FASTLED_RMT_STATIC_ALLOCATION the user has asserted no
+        // network during LED transmission, so this resolves to a compile-
+        // time constant — the linker then drops the entire NetworkDetector
+        // singleton + WiFi-state-reading chain from the binary. See #2856
+        // item 3.3.
+#if FASTLED_RMT_STATIC_ALLOCATION
+        constexpr bool networkActive = false;
+#else
         bool networkActive = NetworkDetector::isAnyNetworkActive();
+#endif
 
         // ============================================================================
         // DMA ALLOCATION POLICY - ESP32-S3 TX/RX Conflict Avoidance
@@ -467,10 +700,11 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
 
         // STEP 1: Try DMA channel creation (first channel only on ESP32-S3)
         if (tryDMA && dataSize > 0) {
-            // Allocate memory from memory manager (DMA bypasses on-chip memory)
-            auto alloc_result = memMgr.allocateTx(
-                state->memoryChannelId, true, networkActive); // true = use DMA
-            if (!alloc_result.ok()) {
+            // Allocate memory from memory manager (DMA bypasses on-chip memory).
+            // Status-code variant avoids result<> ABI at call site (#2856 item 3.5).
+            size_t dma_alloc_words = 0;
+            if (!memMgr.tryAllocateTx(state->memoryChannelId, true,
+                                       networkActive, dma_alloc_words)) {
                 FL_WARN("Memory manager TX allocation failed for DMA channel "
                         << static_cast<int>(state->memoryChannelId));
                 return false;
@@ -526,7 +760,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
                 state->pin = pin;
                 state->timing = timing;
                 state->useDMA = true;
-                state->transmissionComplete = false;
+                state->transmissionComplete.store(false, fl::memory_order_release);
 
                 // Create encoder for this DMA channel
                 state->encoder = mPeripheral.createEncoder(timing, FASTLED_RMT5_CLOCK_HZ);
@@ -555,10 +789,11 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
         }
 
         // STEP 2: Create non-DMA channel (either DMA not attempted, failed, or
-        // disabled) Allocate memory from memory manager (double-buffer policy)
-        auto alloc_result = memMgr.allocateTx(state->memoryChannelId, false,
-                                              networkActive); // false = non-DMA
-        if (!alloc_result.ok()) {
+        // disabled) Allocate memory from memory manager (double-buffer policy).
+        // Status-code variant avoids result<> ABI at call site (#2856 item 3.5).
+        fl::size mem_block_symbols = 0;
+        if (!memMgr.tryAllocateTx(state->memoryChannelId, false,
+                                   networkActive, mem_block_symbols)) {
             // Memory allocation failed - this can happen when:
             // 1. External RMT users (USB CDC, etc.) consume memory
             // 2. Too many non-DMA channels requested
@@ -574,8 +809,6 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
             FL_WARN("  DMA channels in use: " << memMgr.getDMAChannelsInUse() << "/1");
             return false;
         }
-
-        fl::size mem_block_symbols = alloc_result.value();
 
         // Apply previously discovered memory reduction offset (from self-healing)
         // This prevents re-running the progressive retry on every allocation
@@ -627,109 +860,13 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
         // - Minimum: SOC_RMT_MEM_WORDS_PER_CHANNEL (1 block)
 
         if (!success && mem_block_symbols > SOC_RMT_MEM_WORDS_PER_CHANNEL) {
-            FL_WARN("RMT channel allocation failed (initial request: "
-                    << mem_block_symbols << " symbols)");
-            FL_WARN("Attempting progressive memory reduction recovery...");
-
-            mConsecutiveAllocationFailures++;
-            size_t original_symbols = mem_block_symbols;
-            size_t retry_count = 0;
-            const size_t min_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL; // Minimum 1 block
-            bool recovery_succeeded = false;
-
-            // Progressively reduce memory until it works or we hit minimum
-            // CRITICAL: mem_block_symbols MUST be a multiple of SOC_RMT_MEM_WORDS_PER_CHANNEL
-            // Step down by whole blocks (48 symbols on ESP32-S3), not by 1 symbol
-            for (size_t reduced_symbols = mem_block_symbols - SOC_RMT_MEM_WORDS_PER_CHANNEL;
-                 reduced_symbols >= min_symbols;
-                 reduced_symbols -= SOC_RMT_MEM_WORDS_PER_CHANNEL) {
-                retry_count++;
-
-                // Free previous allocation attempt
-                memMgr.free(state->memoryChannelId, true);
-
-                // Try allocating with reduced memory (bypass memory manager, direct allocation)
-                // We need to manually account for this since we're going below expected size
-                Rmt5ChannelConfig retry_config(pin, FASTLED_RMT5_CLOCK_HZ,
-                                                 reduced_symbols, 1, false, intr_priority);
-
-                FL_LOG_RMT("Retry #" << retry_count << ": Attempting " << reduced_symbols
-                           << " symbols (reduced by " << (original_symbols - reduced_symbols) << ")");
-
-                success = mPeripheral.createTxChannel(retry_config, (void**)&state->channel);
-                if (success) {
-                    // SUCCESS - Record the memory reduction offset
-                    mMemoryReductionOffset = original_symbols - reduced_symbols;
-                    mConsecutiveAllocationFailures = 0; // Reset failure counter
-
-                    // Calculate how many words we actually need to reserve
-                    size_t external_words = original_symbols - reduced_symbols;
-
-                    // Show recovery warning with user action guidance
-                    if (!mRecoveryWarningShown) {
-                        fl::sstream msg;
-                        msg << "\n========================================\n"
-                            << "RMT ALLOCATION RECOVERY - ACTION REQUIRED\n"
-                            << "========================================\n"
-                            << "FastLED detected external RMT memory usage!\n"
-                            << "  Expected: " << original_symbols << " symbols available\n"
-                            << "  Actual: " << reduced_symbols << " symbols available\n"
-                            << "  External usage: ~" << external_words << " words\n"
-                            << "\n"
-                            << "To prevent future recovery attempts, add this to setup():\n"
-                            << "----------------------------------------\n"
-                            << "  auto& rmtMgr = fl::RmtMemoryManager::instance();\n"
-                            << "  rmtMgr.reserveExternalMemory(" << external_words << ", 0);\n"
-                            << "----------------------------------------\n"
-                            << "\n"
-                            << "FastLED will continue with reduced buffer size.\n"
-                            << "Performance may be degraded during WiFi/network activity.\n"
-                            << "========================================";
-                        FL_WARN(msg.str());
-                        mRecoveryWarningShown = true;
-                    }
-
-                    // Re-allocate through memory manager with reduced size
-                    // to keep accounting synchronized
-                    // Note: We bypass allocateTx() since channel already created,
-                    // but we need to update the ledger manually
-                    memMgr.recordRecoveryAllocation(state->memoryChannelId, reduced_symbols, true);
-                    FL_LOG_RMT("Recovery: Re-added allocation to ledger: "
-                               << reduced_symbols << " words for channel "
-                               << static_cast<int>(state->memoryChannelId));
-
-                    mem_block_symbols = reduced_symbols;
-                    recovery_succeeded = true;
-                    break; // Exit retry loop
-                }
-            }
-
-            // If recovery failed, show detailed error
-            if (!recovery_succeeded) {
-                fl::sstream msg;
-                msg << "\n========================================\n"
-                    << "RMT CHANNEL ALLOCATION FAILED\n"
-                    << "========================================\n"
-                    << "FastLED could not allocate RMT channel after " << retry_count << " retry attempts\n"
-                    << "  Platform: " << CONFIG_IDF_TARGET << "\n"
-                    << "  Requested: " << original_symbols << " symbols\n"
-                    << "  Minimum attempted: " << min_symbols << " symbols\n"
-                    << "\n"
-                    << "Possible causes:\n"
-                    << "  1. External code is using all RMT channels\n"
-                    << "  2. RMT hardware failure\n"
-                    << "  3. Insufficient RMT memory for platform\n"
-                    << "\n"
-                    << "LEDs on pin " << static_cast<int>(pin) << " will NOT work!\n"
-                    << "========================================";
-                FL_ERROR(msg.str());
-
-                state->channel = nullptr;
-                memMgr.free(state->memoryChannelId, true);
+            // Progressive memory-reduction recovery is a cold path: extracted
+            // into an FL_NO_INLINE helper so its FL_WARN/FL_LOG_RMT operator<<
+            // instantiations don't bloat the hot createChannel body.
+            // See #2773 item 2.2.
+            if (!attemptAllocationRecovery(state, pin, intr_priority, mem_block_symbols)) {
                 return false;
             }
-
-            // Recovery succeeded - fall through to encoder creation
             success = true;
         }
 
@@ -748,7 +885,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
         state->pin = pin;
         state->timing = timing;
         state->useDMA = false; // Non-DMA channel
-        state->transmissionComplete = false;
+        state->transmissionComplete.store(false, fl::memory_order_release);
 
         // Create encoder for this channel
         state->encoder = mPeripheral.createEncoder(timing, FASTLED_RMT5_CLOCK_HZ);
@@ -895,7 +1032,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
 
         // Update timing
         state->timing = timing;
-        state->transmissionComplete = false;
+        state->transmissionComplete.store(false, fl::memory_order_release);
     }
 
     /// @brief Process pending channels that couldn't be started earlier
@@ -928,7 +1065,7 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
 
             // Start transmission
             channel->reset_us = pending.reset_us;
-            channel->transmissionComplete = false;
+            channel->transmissionComplete.store(false, fl::memory_order_release);
 
             // Acquire buffer from pool (PSRAM -> DRAM/DMA transfer)
             // Note: dataSize already retrieved earlier for channel acquisition
@@ -1189,6 +1326,9 @@ class ChannelEngineRMTImpl : public ChannelEngineRMT {
     /// @brief Peripheral interface (real or mock)
     IRMT5Peripheral& mPeripheral;
 
+    /// @brief Manager-owned callback signaled from TX-done ISR.
+    PollNeededCallbackSlot mPollNeededCallback;
+
     /// @brief All RMT channels (active and idle)
     fl::vector_inlined<ChannelState, 16> mChannels;
 
@@ -1333,7 +1473,7 @@ void ChannelEngineRMTImpl::releaseChannel(ChannelState *channel) FL_NOEXCEPT {
     }
 
     channel->inUse = false;
-    channel->transmissionComplete = false;
+    channel->transmissionComplete.store(false, fl::memory_order_release);
 
     // NOTE: Removed GPIO reconfiguration to InputPulldown
     // This was breaking RMT's GPIO matrix routing on ESP32-S3.
@@ -1348,6 +1488,7 @@ bool ChannelEngineRMTImpl::registerChannelCallback(ChannelState *state) FL_NOEXC
     FL_ASSERT(state != nullptr, "registerChannelCallback called with nullptr");
     FL_ASSERT(state->channel != nullptr,
               "registerChannelCallback called with null channel");
+    state->owner = this;
 
     // Register transmission completion callback
     // CRITICAL: state pointer must be stable (not on stack, not subject to
@@ -1498,9 +1639,12 @@ bool IRAM_ATTR ChannelEngineRMTImpl::transmitDoneCallback(
 
     // Mark transmission as complete (polled by main thread)
     // NOTE: This flag triggers releaseChannel(), which performs hardware wait
-    state->transmissionComplete = true;
+    state->transmissionComplete.store(true, fl::memory_order_release);
+    if (state->owner != nullptr) {
+        state->owner->mPollNeededCallback.invoke();
+    }
 
-    // Non-blocking design - no semaphore signal needed
+    // Non-blocking design - the manager-owned callback performs any wakeup.
     return false; // No task switch needed
 }
 

@@ -114,6 +114,37 @@ class ReorderingPixelIteratorAny {
     const PixelIterator& get() const { return mPixelIterator.get(); }
 };
 
+/// @brief Out-of-line cold-path emitter for the #2517 silent-drop
+/// DISABLED-driver diagnostic in `Channel::showPixels`.
+///
+/// `showPixels` runs every frame, but this diagnostic is gated behind a
+/// one-shot latch (`mDisabledDriverWarned`) and only fires when a bound
+/// driver has been runtime-disabled (typically by
+/// `FastLED.setExclusiveDriver<OtherBus>()`). Inlining the two
+/// alternative FL_ERROR chains was costing ~10 `operator<<`
+/// instantiations in showPixels' prologue/epilogue for code that runs
+/// at most once per channel lifetime. Splitting matches the same
+/// pattern the maintainer adopted for `resolveDynamicDriver()` in PR
+/// #2830 — keep the diagnostic chain in a `FL_NO_INLINE` helper so it
+/// can't fold back into the hot path. (#2773 follow-up to #2832.)
+FL_NO_INLINE
+static void emitDisabledDriverError(const fl::string& channelName,
+                                    const fl::string& driverName,
+                                    const fl::string& exclusive) FL_NOEXCEPT {
+    if (!exclusive.empty()) {
+        FL_ERROR("Channel '" << channelName << "': bound driver '" << driverName
+            << "' is currently DISABLED by exclusive-driver selection '"
+            << exclusive << "'. Frame will be silently dropped. "
+            << "Resolve with: FastLED.enableDrivers<fl::Bus::"
+            << driverName << ">() or FastLED.enableAllDrivers().");
+    } else {
+        FL_ERROR("Channel '" << channelName << "': bound driver '" << driverName
+            << "' is currently DISABLED. Frame will be silently dropped. "
+            << "Resolve with: FastLED.enableDrivers<fl::Bus::"
+            << driverName << ">() or FastLED.enableAllDrivers().");
+    }
+}
+
 }  // anonymous namespace
 
 
@@ -126,7 +157,18 @@ fl::string Channel::makeName(i32 id, const fl::optional<fl::string>& configName)
     if (configName.has_value()) {
         return configName.value();
     }
+    // Auto-naming `"Channel_<id>"` only matters for diagnostics — in release
+    // builds (NDEBUG → FASTLED_LOG_VERBOSITY=0 per Stage 1) every FL_WARN /
+    // FL_ERROR site that reads mName collapses to `do { } while(0)`, so the
+    // string and the supporting `fl::to_string` + `operator+` chain go
+    // unused. Empty in release saves the `fl::to_string<i64>` instantiation
+    // plus the heap allocation per Channel ctor. See #2942 / #2886.
+#if FASTLED_LOG_RUNTIME_ENABLED
     return "Channel_" + fl::to_string(static_cast<i64>(id));
+#else
+    (void)id;
+    return {};
+#endif
 }
 
 ChannelPtr Channel::create(const ChannelConfig &config) {
@@ -335,6 +377,75 @@ void writeUCS7604(fl::vector_psram<u8>* data, PixelIterator& pixelIterator,
 
 } // anonymous namespace
 
+/// @brief Cold fallback for the non-pre-bound driver path. Handles dynamic
+///        `ChannelManager::selectDriverForChannel` lookup AND the
+///        bus-key-miss diagnostic chain. Hoisted out of `showPixels` so the
+///        hot legacy `addLeds<>` path stays compact — see #2773 item 2.1.
+///
+/// Marked `noinline` (via `FL_NOINLINE`) so the compiler doesn't fold the
+/// cold body back into `showPixels`. The whole helper is reachable only
+/// when `mDriverPreBound == false`, which on stock Blink is never true —
+/// LTO can use that across the call site to keep the cold body off the
+/// hot icache line.
+FL_NO_INLINE
+fl::shared_ptr<IChannelDriver> Channel::resolveDynamicDriver() {
+#if defined(FASTLED_DISABLE_DYNAMIC_DRIVER) && FASTLED_DISABLE_DYNAMIC_DRIVER
+    // Body excluded via FASTLED_DISABLE_DYNAMIC_DRIVER (#2926). The
+    // showPixels call site is also gated so this is unreachable; the
+    // empty body lets the linker dead-strip ChannelManager::findDriverByName
+    // and selectDriverForChannel along with this symbol.
+    return {};
+#else
+    // Build busKey only when we actually need it (mBus != AUTO).
+    fl::string busKey;
+    if (mBus != Bus::AUTO) {
+        busKey = fl::string::from_literal(busName(mBus));
+    }
+
+    fl::shared_ptr<IChannelDriver> driver =
+        ChannelManager::instance().selectDriverForChannel(mChannelData, busKey);
+    mDriver = driver;
+
+    // #2455 / #2459: one-shot diagnostic when a typed-Bus miss happens.
+    // Probe via `findDriverByName` (silent) to distinguish "driver wasn't
+    // instantiated" from "driver exists but canHandle() rejected this
+    // chipset" — resolution paths differ. The mBusWarned guard suppresses
+    // duplicate logs on subsequent shows of the same channel.
+#if FASTLED_LOG_RUNTIME_ENABLED
+    if (mBus != Bus::AUTO && !mBusWarned &&
+        (!driver || driver->getName() != busKey)) {
+        auto busDriver = ChannelManager::instance().findDriverByName(busKey);
+        if (!busDriver) {
+            // Typed Bus miss — emit the actionable hint with the three
+            // currently-shipping remediations (option 3 added in #2460).
+            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
+                << "' wasn't instantiated. Resolve with: "
+                << "(1) fl::enableDrivers<fl::Bus::" << busKey << ">() "
+                << "(links only this driver), "
+                << "(2) FastLED.enableAllDrivers() (links every driver), or "
+                << "(3) FastLED.addLeds<..., fl::Bus::" << busKey << ">(...) "
+                << "(legacy API; pins Bus + triggers linker keep-alive). "
+                << "Defaulting to AUTO/priority dispatch.");
+        } else {
+            // Registered, but canHandle() said no — bus/chipset mismatch.
+            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
+                << "' is registered but cannot handle this channel's chipset "
+                << "(bus/chipset mismatch). Defaulting to AUTO/priority dispatch.");
+        }
+        mBusWarned = true;
+    }
+    if (!driver) {
+        FL_ERROR("Channel '" << mName << "': No compatible driver found - cannot transmit");
+    }
+#endif  // FASTLED_LOG_RUNTIME_ENABLED — release skips the per-frame
+        // driver->getName() != busKey compare + the silent
+        // findDriverByName probe (used only to differentiate the
+        // FL_ERROR message). The functional return value below is
+        // preserved in both builds. See #2952.
+    return driver;
+#endif  // !FASTLED_DISABLE_DYNAMIC_DRIVER
+}
+
 void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
     FL_SCOPED_TRACE;
 
@@ -360,50 +471,40 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
     // their constructor), bypass ChannelManager entirely. Channels created via
     // the manager-based API (Channel::create(cfg) without affinity) keep their
     // existing per-frame re-selection so users can swap drivers at runtime.
-    // Resolve dispatch via the typed `mBus` field (#2459). `Bus::AUTO`
-    // means "no pinning — let the manager pick by priority"; any other
-    // value pins this channel to `busName(mBus)`.
-    fl::string busKey;
-    if (mBus != Bus::AUTO) {
-        busKey = fl::string::from_literal(busName(mBus));
-    }
+    //
+    // **Fast path (#2773 item 2.1):** the legacy `addLeds<NEOPIXEL>` flow is
+    // by far the hot per-frame path on stock Blink. It needs no busKey
+    // construction, no dynamic driver lookup, no busKey-miss diagnostics,
+    // and no fallback `FL_ERROR` reporting — the driver was already pre-bound
+    // in the controller's constructor. Pulling all of that boilerplate out
+    // of `showPixels` lets the compiler keep the hot path compact and lets
+    // the slow path's `fl::string` ops / `ChannelManager::selectDriverForChannel`
+    // / diagnostic literals tree-shake on the slow-path branch's coldness.
     fl::shared_ptr<IChannelDriver> driver;
     if (mDriverPreBound) {
         driver = mDriver.lock();
-    } else {
-        driver = ChannelManager::instance().selectDriverForChannel(mChannelData, busKey);
-        mDriver = driver;
-    }
-    // #2455 / #2459: one-shot diagnostic when a typed-Bus miss happens.
-    // Probe via `findDriverByName` (silent) to distinguish "driver wasn't
-    // instantiated" from "driver exists but canHandle() rejected this
-    // chipset" — resolution paths differ. The mBusWarned guard suppresses
-    // duplicate logs on subsequent shows of the same channel.
-    if (!mDriverPreBound && mBus != Bus::AUTO && !mBusWarned &&
-        (!driver || driver->getName() != busKey)) {
-        auto busDriver = ChannelManager::instance().findDriverByName(busKey);
-        if (!busDriver) {
-            // Typed Bus miss — emit the actionable hint with the three
-            // currently-shipping remediations (option 3 added in #2460).
-            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
-                << "' wasn't instantiated. Resolve with: "
-                << "(1) fl::enableDrivers<fl::Bus::" << busKey << ">() "
-                << "(links only this driver), "
-                << "(2) FastLED.enableAllDrivers() (links every driver), or "
-                << "(3) FastLED.addLeds<..., fl::Bus::" << busKey << ">(...) "
-                << "(legacy API; pins Bus + triggers linker keep-alive). "
-                << "Defaulting to AUTO/priority dispatch.");
-        } else {
-            // Registered, but canHandle() said no — bus/chipset mismatch.
-            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
-                << "' is registered but cannot handle this channel's chipset "
-                << "(bus/chipset mismatch). Defaulting to AUTO/priority dispatch.");
+        if (!driver) {
+            // Pre-bound driver got destroyed (singleton shutdown, etc.). Silent
+            // bail — this is unrecoverable from showPixels.
+            return;
         }
-        mBusWarned = true;
-    }
-    if (!driver) {
-        FL_ERROR("Channel '" << mName << "': No compatible driver found - cannot transmit");
+    } else {
+#if !defined(FASTLED_DISABLE_DYNAMIC_DRIVER) || !FASTLED_DISABLE_DYNAMIC_DRIVER
+        driver = resolveDynamicDriver();
+        if (!driver) {
+            return;
+        }
+#else
+        // Dynamic-driver lookup gated out via FASTLED_DISABLE_DYNAMIC_DRIVER
+        // (#2926). The else branch is dead at runtime for every legacy
+        // `addLeds<>` flavor — those pre-bind their driver in the ctor. The
+        // gate lets `--gc-sections` drop the resolveDynamicDriver body plus
+        // the ChannelManager::findDriverByName / selectDriverForChannel
+        // chain (~400-900 B). Channels created via `Channel::create(cfg)`
+        // without a pre-bound driver silently emit nothing under this flag —
+        // user accepts the constraint.
         return;
+#endif
     }
 
     // Build pixel iterator with optional addressing transformation
@@ -426,15 +527,40 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
             case ClocklessEncoder::CLOCKLESS_ENCODER_WS2812:
                 pixelIterator.writeWS2812(&data);
                 break;
+#if !defined(FASTLED_DISABLE_UCS7604) || !FASTLED_DISABLE_UCS7604
+            // Gated by FASTLED_DISABLE_UCS7604 (#2920). For WS2812-only
+            // sketches the UCS7604 case is dead at runtime, but each
+            // `writeUCS7604(...)` reference is statically reachable,
+            // keeping the encoder bodies linked. Setting
+            // `-DFASTLED_DISABLE_UCS7604=1` drops the case + the
+            // `encodeUCS7604_16bit_RGB` / `encodeUCS7604_16bit_RGBW`
+            // template instantiations (~400-600 B). When the gate is
+            // enabled, calling showPixels() on a UCS7604 channel
+            // silently emits nothing.
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_8BIT:
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_16BIT:
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_16BIT_1600:
                 writeUCS7604(&data, pixelIterator, clockless->encoder,
                              mSettings, mRgbOrder);
                 break;
+#endif  // !FASTLED_DISABLE_UCS7604
         }
+#if !defined(FASTLED_DISABLE_SPI_CHIPSETS) || !FASTLED_DISABLE_SPI_CHIPSETS
     } else if (mChipset.is<SpiChipsetConfig>()) {
-        // SPI chipsets: dispatch based on chipset type (zero allocation)
+        // SPI chipsets: dispatch based on chipset type (zero allocation).
+        //
+        // Gated by FASTLED_DISABLE_SPI_CHIPSETS (#2913). For NEOPIXEL-only
+        // sketches on ESP32-S3 the SPI branch is dead at runtime, but the
+        // compiler cannot prove that — each pixelIterator.writeXXX(...)
+        // reference below is statically reachable, keeping ~720 B of
+        // encoder bodies (writeAPA102, writeSK9822, writeLPD8806,
+        // writeSM16716) plus the 11-case switch table linked. Setting
+        // `-DFASTLED_DISABLE_SPI_CHIPSETS=1` in build_flags drops the
+        // whole branch and recovers ~1.0-1.2 KB on a NEOPIXEL Blink.
+        //
+        // When the gate is enabled, calling showPixels() on an
+        // SpiChipsetConfig channel silently emits nothing — the user
+        // accepts that constraint by setting the flag.
         const SpiChipsetConfig* spi = mChipset.ptr<SpiChipsetConfig>();
         const SpiEncoder& config = spi->timing;
 
@@ -491,6 +617,7 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
         }
         // No default case - compiler will error if any enum value is missing
     }
+#endif  // !FASTLED_DISABLE_SPI_CHIPSETS
 
     // Fire event after encoding completes
     {
@@ -499,6 +626,45 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
     }
 
 
+
+    // #2517: detect the silent-drop scenario before enqueuing — if the
+    // resolved driver is registered with ChannelManager but currently
+    // disabled (typically by `FastLED.setExclusiveDriver<OtherBus>()`),
+    // `ChannelManager::onEndFrame()` will skip its `show()` call and the
+    // frame is silently dropped on the floor. Emit an actionable
+    // FL_ERROR so users can diagnose the missing output.
+    //
+    // One-shot via `mDisabledDriverWarned` to avoid per-frame spam.
+    // Reset the latch whenever the driver returns to ENABLED so a later
+    // disable re-emits the diagnostic.
+    fl::string driverName = driver->getName();
+    auto status = ChannelManager::instance().driverStatus(driverName);
+    if (status == ChannelManager::DriverStatus::STATUS_DISABLED) {
+#if FASTLED_LOG_RUNTIME_ENABLED
+        if (!mDisabledDriverWarned) {
+            emitDisabledDriverError(
+                mName, driverName,
+                ChannelManager::instance().exclusiveDriverName());
+            mDisabledDriverWarned = true;
+        }
+#endif
+        // Skip the enqueue — the data wouldn't be sent anyway, and dropping
+        // it here matches the existing behaviour (rather than leaving stale
+        // bytes in the driver's pending queue across an enable/disable flip).
+        // The drop happens in both debug and release; only the diagnostic
+        // and the one-shot latch are gated. In release, the empty
+        // emitDisabledDriverError + the exclusiveDriverName() call + the
+        // 3-arg fl::string chain dead-strip (see #2950).
+        return;
+    } else if (status == ChannelManager::DriverStatus::STATUS_ENABLED) {
+#if FASTLED_LOG_RUNTIME_ENABLED
+        // Reset the one-shot guard so a future disable re-emits the diagnostic.
+        mDisabledDriverWarned = false;
+#endif
+    }
+    // NOT_REGISTERED: driver is not managed by ChannelManager (e.g. a custom
+    // test driver, or one that was removed). Fall through to enqueue and let
+    // the driver decide what to do — this is the historic behaviour.
 
     // Enqueue for transmission (will be sent when driver->show() is called)
     driver->enqueue(mChannelData);

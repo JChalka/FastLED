@@ -22,6 +22,33 @@
 #include <avr/io.h>      // ok include — MCUSR
 // IWYU pragma: end_keep
 
+// Capability gate. The implementation below assumes the classic-AVR symbol
+// surface (`MCUSR` + `WDRF`/`BORF`/`EXTRF`/`PORF` reset-cause bits, and the
+// extended `WDTO_8S` timeout constant). That surface is present on the bulk
+// of the AVR line — ATmega328P, ATmega2560, ATtiny85, ATtiny88, ATtiny4313,
+// etc. — but is **not** universal:
+//
+//   * **ATmega8 / ATmega8A** — the original ATmega8 caps the WDT prescaler
+//     at `WDTO_2S`; `WDTO_4S` and `WDTO_8S` are not defined. Reset cause is
+//     reported via `MCUCSR` (different name) on these older parts.
+//   * **megaAVR-0 / tinyAVR-1 series** (ATmega4809 a.k.a. nano_every,
+//     ATtiny1604, ATtiny1616, etc.) — these use the new RSTCTRL peripheral
+//     for reset cause and the new WDT peripheral via `WDT.CTRLA`. None of
+//     `MCUSR`, `WDRF`, `EXTRF`, `PORF`, or `WDTO_8S` are declared on these
+//     chips. The avr-libc `<avr/wdt.h>` shim exists but the legacy symbols
+//     do not.
+//
+// When the required symbols aren't all present we fall back to the platform-
+// agnostic no-op watchdog so the firmware still links. Real hardware WDT
+// support for the megaAVR-0 / tinyAVR-1 / ATmega8 families can be added
+// later as separate per-family impls without changing the dispatcher.
+#if !(defined(WDTO_8S) && defined(MCUSR) && defined(WDRF) && \
+      defined(BORF) && defined(EXTRF) && defined(PORF))
+
+#include "platforms/shared/watchdog_noop.hpp"
+
+#else  // classic-AVR symbol surface available — full hardware implementation
+
 #define FL_WATCHDOG_HAS_HARDWARE
 #define FL_WATCHDOG_PERSIST_BYTES 8
 #define FL_WATCHDOG_MAX_TIMEOUT_MS 8000u
@@ -81,21 +108,29 @@ inline fl::u8 timeoutToWdtoConstant(fl::u32 ms) {
     return WDTO_8S;
 }
 
-// `.init3` constructor: runs after the C runtime has zeroed BSS but before
-// `main()`. Captures MCUSR for later cause reporting, then clears it and
-// disables the WDT so a post-WDT-reset boot cannot loop forever.
+// `.init3` hook: runs before avr-libc's `.init4` BSS/data initialization
+// and before `main()`. Captures MCUSR for later cause reporting, then clears
+// it and disables the WDT so a post-WDT-reset boot cannot loop forever.
+// (See the `sAvrCapturedMcusr` declaration above for why that variable must
+// stay in `.noinit` — `.init4` would otherwise wipe it after we capture.)
 //
-// NOTE: We deliberately do NOT mark this `naked`. `naked` functions are not
-// intended to hold ordinary C/C++ statements — GCC still needs to manage
-// register/stack expectations around the assignments and the `wdt_disable()`
-// call, and the result is fragile across optimization/toolchain versions.
-// A normal `.init3` hook works correctly here because `.init3` runs after
-// `.init2` (BSS zeroed, stack set up).
-__attribute__((used, section(".init3")))
-inline void fastled_watchdog_init3() {
+// **MUST be `naked`.** `.init3` is not a function call site — the linker
+// concatenates this code inline between `.init2` and `.init4`, and there is
+// no return address on the stack when it runs. A non-`naked` function emits
+// a prologue/epilogue ending in `ret`, which on AVR pops two bytes of
+// uninitialized SRAM and jumps there, hanging the chip before `setup()` can
+// run. This is the canonical avr-libc pattern for clearing `MCUSR` /
+// `WDT` in `.init3`; see issue #2798 for the AVR8JS regression that proved
+// out the previous non-naked version. The three statements below compile
+// to bare `STS`/inline-asm sequences with no stack temps, so `naked` is
+// safe — and is in fact the only correct choice for code placed in `.initN`.
+__attribute__((naked, used, section(".init3")))
+void fastled_watchdog_init3() {
     sAvrCapturedMcusr = MCUSR;
     MCUSR = 0;
     wdt_disable();
+    // Intentionally no `ret`: the linker concatenates `.init3` directly into
+    // the boot init chain and execution falls through to `.init4`.
 }
 
 } // namespace platforms
@@ -192,3 +227,5 @@ WatchdogCrashReport Watchdog::readCrashReport() const FL_NOEXCEPT {
 void                Watchdog::clearCrashReport() FL_NOEXCEPT {}
 
 } // namespace fl
+
+#endif  // classic-AVR symbol surface available

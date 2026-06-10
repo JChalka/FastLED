@@ -28,6 +28,7 @@ from ci.lint.stage_impls import (
 )
 from ci.lint.stages import LintStage
 from ci.lint_meson.run_all_checkers import run_meson_lint
+from ci.lint_platformio.run_all_checkers import run_platformio_lint
 from ci.util.global_interrupt_handler import install_signal_handler, wait_for_cleanup
 
 
@@ -153,7 +154,9 @@ def print_ai_hints() -> None:
     print("  - Use 'bash lint --tidy' to run clang-tidy static analysis on src/fl")
     print("  - Python linting includes: ruff (lint + format) + KBI checker + ty")
     print("  - Use --strict to also run pyright (strict type checking)")
-    print("  - C++ linting includes: clang-format and custom checkers")
+    print(
+        "  - C++ linting includes: clang-format, custom checkers, and the default FL_NOEXCEPT AST ratchet"
+    )
     print("  - IWYU runs with --full, --iwyu, or --strict flags")
     print("  - clang-tidy runs with --tidy flag")
     print("  - JavaScript linting: FAST ONLY (no slow fallback)")
@@ -229,12 +232,27 @@ def create_stages(args: LintArgs) -> list[LintStage]:
         )
 
     # Meson build file stage (runs in parallel with other stages)
-    if run_cpp:
+    # Skipped when --skip-meson is passed (e.g. by the stop hook when no
+    # meson.build / meson_options.txt files changed this session).
+    if run_cpp and not args.skip_meson:
         stages.append(
             LintStage(
                 name="meson_linting",
                 display_name="MESON BUILD LINTING",
                 run_fn=run_meson_lint,
+                timeout=30.0,
+            )
+        )
+
+    # PlatformIO-internal-usage stage (issue #2701, warn-only by default).
+    # Runs whenever non-JS-only linting is invoked — repo hygiene check
+    # for build/CI scripts. Skipped via --skip-platformio-check.
+    if not args.js_only and not args.skip_platformio_check:
+        stages.append(
+            LintStage(
+                name="platformio_internal_usage",
+                display_name="PLATFORMIO-INTERNAL-USAGE LINT",
+                run_fn=lambda: run_platformio_lint(),
                 timeout=30.0,
             )
         )

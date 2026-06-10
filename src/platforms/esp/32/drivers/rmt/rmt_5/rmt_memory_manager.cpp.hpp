@@ -160,6 +160,13 @@ bool RmtMemoryManager::isPlatformGlobalPool() FL_NOEXCEPT {
 }
 
 size_t RmtMemoryManager::calculateMemoryBlocks(bool networkActive) FL_NOEXCEPT {
+#if FASTLED_RMT_STATIC_ALLOCATION
+    // Static-allocation mode: skip the runtime planner entirely.
+    // User has asserted single fixed strip / no network / boot-time init.
+    // See #2773 item 2.5.
+    (void)networkActive;
+    return FASTLED_RMT_MEM_BLOCKS;
+#else
     // Read memory block strategy from singleton instance
     auto& mgr = instance();
     size_t idleBlocks = mgr.mIdleBlocks;
@@ -301,6 +308,7 @@ size_t RmtMemoryManager::calculateMemoryBlocks(bool networkActive) FL_NOEXCEPT {
            << ", allocated_tx_channels=" << allocated_tx_channels << ")");
 
     return requested_blocks;
+#endif // FASTLED_RMT_STATIC_ALLOCATION
 }
 
 void RmtMemoryManager::setMemoryBlockStrategy(size_t idleBlocks, size_t networkBlocks) FL_NOEXCEPT {
@@ -388,65 +396,13 @@ result<size_t, RmtMemoryError> RmtMemoryManager::allocateTx(u8 channel_id, bool 
     size_t mem_blocks = calculateMemoryBlocks(networkActive);
     size_t words_needed = mem_blocks * SOC_RMT_MEM_WORDS_PER_CHANNEL;
 
-    // Try to allocate from appropriate pool
+    // Try to allocate from appropriate pool. The failure path (single-buffer
+    // fallback + multi-line diagnostic block) is extracted to an
+    // FL_NO_INLINE cold helper so the hot path here stays small. See
+    // #2773 item 2.5.
     if (!tryAllocateWords(words_needed, true)) {
-        // ITERATION 2 FIX: Progressive fallback for multi-channel scenarios
-        // When double-buffering (2 blocks) fails, try single-buffering (1 block)
-        // This allows more channels to coexist on memory-constrained platforms like ESP32-S3
-        // where total TX memory is only 192 words (4 × 48-word blocks).
-        //
-        // Example: ESP32-S3 with 8 lanes:
-        // - 2 blocks/channel: 2 × 96 = 192 words → only 2 channels fit
-        // - 1 block/channel: 1 × 48 = 48 words → 4 channels fit
-        //
-        // Trade-off: Single-buffering reduces performance slightly but enables multi-lane validation
-        if (mem_blocks > 1) {
-            size_t fallback_blocks = 1;  // Minimum: single-buffer
-            size_t fallback_words = fallback_blocks * SOC_RMT_MEM_WORDS_PER_CHANNEL;
-
-            FL_LOG_RMT("RMT TX allocation failed with " << mem_blocks << "× buffering (" << words_needed << " words)");
-            FL_LOG_RMT("  Attempting fallback to " << fallback_blocks << "× buffering (" << fallback_words << " words)...");
-
-            if (tryAllocateWords(fallback_words, true)) {
-                FL_LOG_RMT("  ✓ Fallback successful: allocated " << fallback_words << " words (single-buffer mode)");
-                mLedger.allocations.push_back(ChannelAllocation(channel_id, fallback_words, true, false));
-                FL_LOG_RMT("RMT TX channel " << static_cast<int>(channel_id)
-                           << " allocated (non-DMA, " << fallback_words << " words, single-buffer)");
-                return result<size_t, RmtMemoryError>::success(fallback_words);
-            }
-
-            FL_LOG_RMT("  ✗ Fallback failed: insufficient memory even for single-buffer");
-        }
-
-        // Fallback failed or not attempted - provide detailed diagnostic message
-        size_t total = mLedger.is_global_pool ? mLedger.total_words : mLedger.total_tx_words;
-        size_t allocated = mLedger.is_global_pool ? mLedger.allocated_words : mLedger.allocated_tx_words;
-        size_t reserved = mLedger.reserved_tx_words;
-        size_t available = getAvailableWords(true);
-
-        FL_WARN("RMT TX allocation failed for channel " << static_cast<int>(channel_id));
-        FL_WARN("  Requested: " << words_needed << " words (" << mem_blocks << "× buffer"
-                << (networkActive ? ", Network mode" : "") << ")");
-        FL_WARN("  Available: " << available << " words");
-        FL_WARN("  Memory breakdown: Total=" << total << ", Allocated=" << allocated
-                << ", Reserved=" << reserved << " (external RMT usage)");
-
-        // Provide actionable suggestions based on the failure scenario
-        if (reserved > 0) {
-            FL_WARN("  Suggestion: " << reserved << " words reserved by external RMT usage (e.g., USB CDC)");
-            FL_WARN("              Consider using DMA channels (use_dma=true) to bypass on-chip memory");
-        }
-        if (allocated > 0) {
-            FL_WARN("  Suggestion: " << allocated << " words already allocated to other channels");
-            FL_WARN("              Consider reducing LED count or using fewer channels");
-        }
-        if (mem_blocks > 2 && networkActive) {
-            FL_WARN("  Suggestion: Network mode uses 3× buffering (" << (mem_blocks * SOC_RMT_MEM_WORDS_PER_CHANNEL)
-                    << " words per channel)");
-            FL_WARN("              Consider disabling network or using DMA channels");
-        }
-
-        return result<size_t, RmtMemoryError>::failure(RmtMemoryError::INSUFFICIENT_TX_MEMORY);
+        return handleAllocateTxFailure(channel_id, mem_blocks, words_needed,
+                                       networkActive);
     }
 
     mLedger.allocations.push_back(ChannelAllocation(channel_id, words_needed, true, false));
@@ -456,6 +412,75 @@ result<size_t, RmtMemoryError> RmtMemoryManager::allocateTx(u8 channel_id, bool 
                << (networkActive ? ", Network mode" : "") << ")");
 
     return result<size_t, RmtMemoryError>::success(words_needed);
+}
+
+FL_NO_INLINE result<size_t, RmtMemoryError>
+RmtMemoryManager::handleAllocateTxFailure(u8 channel_id, size_t mem_blocks,
+                                          size_t words_needed,
+                                          bool networkActive) FL_NOEXCEPT {
+    // ITERATION 2 FIX: Progressive fallback for multi-channel scenarios.
+    // When double-buffering (2 blocks) fails, try single-buffering (1 block)
+    // so more channels can coexist on memory-constrained platforms like
+    // ESP32-S3 (192 words total = 4 × 48-word blocks).
+    //
+    // Example: ESP32-S3 with 8 lanes:
+    // - 2 blocks/channel: 2 × 96 = 192 words → only 2 channels fit
+    // - 1 block/channel: 1 × 48 = 48 words → 4 channels fit
+    //
+    // Trade-off: Single-buffering reduces performance slightly but enables
+    // multi-lane validation.
+    if (mem_blocks > 1) {
+        size_t fallback_blocks = 1;
+        size_t fallback_words = fallback_blocks * SOC_RMT_MEM_WORDS_PER_CHANNEL;
+
+        FL_LOG_RMT("RMT TX allocation failed with " << mem_blocks << "× buffering (" << words_needed << " words)");
+        FL_LOG_RMT("  Attempting fallback to " << fallback_blocks << "× buffering (" << fallback_words << " words)...");
+
+        if (tryAllocateWords(fallback_words, true)) {
+            FL_LOG_RMT("  [OK] Fallback successful: allocated " << fallback_words << " words (single-buffer mode)");
+            mLedger.allocations.push_back(ChannelAllocation(channel_id, fallback_words, true, false));
+            FL_LOG_RMT("RMT TX channel " << static_cast<int>(channel_id)
+                       << " allocated (non-DMA, " << fallback_words << " words, single-buffer)");
+            return result<size_t, RmtMemoryError>::success(fallback_words);
+        }
+
+        FL_LOG_RMT("  [FAIL] Fallback failed: insufficient memory even for single-buffer");
+    }
+
+    // Fallback failed or not attempted - provide detailed diagnostic message.
+    // Gate the entire block on FASTLED_LOG_RUNTIME_ENABLED — in release
+    // builds (NDEBUG → FASTLED_LOG_VERBOSITY=0 per Stage 1) the 9 FL_WARN
+    // bodies collapse to do-while-0, but the locals they feed (including
+    // the getAvailableWords() call + 3 mLedger reads) still run. See #2956.
+#if FASTLED_LOG_RUNTIME_ENABLED
+    size_t total = mLedger.is_global_pool ? mLedger.total_words : mLedger.total_tx_words;
+    size_t allocated = mLedger.is_global_pool ? mLedger.allocated_words : mLedger.allocated_tx_words;
+    size_t reserved = mLedger.reserved_tx_words;
+    size_t available = getAvailableWords(true);
+
+    FL_WARN("RMT TX allocation failed for channel " << static_cast<int>(channel_id));
+    FL_WARN("  Requested: " << words_needed << " words (" << mem_blocks << "× buffer"
+            << (networkActive ? ", Network mode" : "") << ")");
+    FL_WARN("  Available: " << available << " words");
+    FL_WARN("  Memory breakdown: Total=" << total << ", Allocated=" << allocated
+            << ", Reserved=" << reserved << " (external RMT usage)");
+
+    if (reserved > 0) {
+        FL_WARN("  Suggestion: " << reserved << " words reserved by external RMT usage (e.g., USB CDC)");
+        FL_WARN("              Consider using DMA channels (use_dma=true) to bypass on-chip memory");
+    }
+    if (allocated > 0) {
+        FL_WARN("  Suggestion: " << allocated << " words already allocated to other channels");
+        FL_WARN("              Consider reducing LED count or using fewer channels");
+    }
+    if (mem_blocks > 2 && networkActive) {
+        FL_WARN("  Suggestion: Network mode uses 3× buffering (" << (mem_blocks * SOC_RMT_MEM_WORDS_PER_CHANNEL)
+                << " words per channel)");
+        FL_WARN("              Consider disabling network or using DMA channels");
+    }
+#endif
+
+    return result<size_t, RmtMemoryError>::failure(RmtMemoryError::INSUFFICIENT_TX_MEMORY);
 }
 
 result<size_t, RmtMemoryError> RmtMemoryManager::allocateRx(u8 channel_id, size_t symbols, bool use_dma) FL_NOEXCEPT {
@@ -511,7 +536,37 @@ result<size_t, RmtMemoryError> RmtMemoryManager::allocateRx(u8 channel_id, size_
     return result<size_t, RmtMemoryError>::success(words_needed);
 }
 
+bool RmtMemoryManager::tryAllocateTx(u8 channel_id, bool use_dma, bool networkActive,
+                                      size_t& out_words) FL_NOEXCEPT {
+    auto r = allocateTx(channel_id, use_dma, networkActive);
+    if (r.ok()) {
+        out_words = r.value();
+        return true;
+    }
+    return false;
+}
+
+bool RmtMemoryManager::tryAllocateRx(u8 channel_id, size_t symbols, bool use_dma,
+                                      size_t& out_words) FL_NOEXCEPT {
+    auto r = allocateRx(channel_id, symbols, use_dma);
+    if (r.ok()) {
+        out_words = r.value();
+        return true;
+    }
+    return false;
+}
+
 void RmtMemoryManager::free(u8 channel_id, bool is_tx) FL_NOEXCEPT {
+#if FASTLED_RMT_STATIC_ALLOCATION
+    // Static-allocation mode: the user has asserted no removeLeds() / late
+    // addLeds(). The destructor still calls free() at process end but the
+    // ledger isn't meaningfully tracked, so erasing from the allocations
+    // vector + emitting the FL_LOG_RMT diagnostic is dead work. Skipping it
+    // lets the linker drop fl::vector_inlined::erase + the diagnostic
+    // operator<< chain. See #2856 item 3.6.
+    (void)channel_id;
+    (void)is_tx;
+#else
     ChannelAllocation* alloc = findAllocation(channel_id, is_tx);
     if (!alloc) {
         FL_WARN("RMT " << (is_tx ? "TX" : "RX") << " channel "
@@ -533,6 +588,7 @@ void RmtMemoryManager::free(u8 channel_id, bool is_tx) FL_NOEXCEPT {
             break;
         }
     }
+#endif
 }
 
 void RmtMemoryManager::recordRecoveryAllocation(u8 channel_id, size_t words, bool is_tx) FL_NOEXCEPT {
@@ -722,7 +778,14 @@ bool RmtMemoryManager::allocateDMA(u8 channel_id, bool is_tx) FL_NOEXCEPT {
 }
 
 void RmtMemoryManager::freeDMA(u8 channel_id, bool is_tx) FL_NOEXCEPT {
-#if FASTLED_RMT5_DMA_SUPPORTED
+#if FASTLED_RMT_STATIC_ALLOCATION
+    // Static-allocation mode: see RmtMemoryManager::free() for rationale.
+    // The destructor still reaches this; skipping the mismatch-diagnostic
+    // FL_WARN sites lets the linker drop the operator<< chains. See #2856
+    // item 3.6.
+    (void)channel_id;
+    (void)is_tx;
+#elif FASTLED_RMT5_DMA_SUPPORTED
     if (!mDMAAllocation.allocated) {
         FL_WARN("DMA free called but no DMA allocated");
         return;

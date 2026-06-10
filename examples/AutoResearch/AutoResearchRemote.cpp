@@ -30,6 +30,7 @@
 #include "fl/task/promise.h"
 #include "fl/math/simd.h"
 #include "AutoResearchSimd.h"
+#include "AutoResearchAnimartrixBench.h"  // animartrixPerlinBench RPC (#2628 follow-up)
 #include "AutoResearchWave8Expand.h"  // #2526 wave8ExpandBenchmark RPC
 #include "AutoResearchParlioEncode.h" // parlioEncodeBenchmark RPC (#2526 follow-up)
 #include "AutoResearchParlioStream.h" // parlioStreamValidate RPC (#2548 follow-up)
@@ -104,6 +105,207 @@ fl::json makeResponse(bool success, ReturnCode returnCode, const char* message,
 }
 
 // No forward declarations needed - using one-test-per-RPC architecture
+
+namespace {
+
+uint32_t expectedClocklessWireUs(const fl::ChipsetTimingConfig& timing,
+                                 uint32_t max_leds) {
+    const uint64_t bit_period_ns = timing.total_period_ns();
+    const uint64_t payload_ns =
+        static_cast<uint64_t>(max_leds) * 24ULL * bit_period_ns;
+    return static_cast<uint32_t>((payload_ns + 999ULL) / 1000ULL) +
+           timing.reset_us;
+}
+
+uint32_t maxLaneLeds(const fl::vector<fl::ChannelConfig>& tx_configs) {
+    uint32_t max_leds = 0;
+    for (fl::size i = 0; i < tx_configs.size(); i++) {
+        const uint32_t count =
+            static_cast<uint32_t>(tx_configs[i].mLeds.size());
+        if (count > max_leds) {
+            max_leds = count;
+        }
+    }
+    return max_leds;
+}
+
+class ScopedFastLedBrightness {
+  public:
+    explicit ScopedFastLedBrightness(uint8_t brightness) FL_NOEXCEPT
+        : mSavedBrightness(FastLED.getBrightness()) {
+        FastLED.setBrightness(brightness);
+    }
+
+    ~ScopedFastLedBrightness() FL_NOEXCEPT {
+        FastLED.setBrightness(mSavedBrightness);
+    }
+
+  private:
+    uint8_t mSavedBrightness;
+};
+
+fl::json measureTightTiming(const fl::string& driver_name,
+                            const fl::ChipsetTimingConfig& timing,
+                            const fl::vector<fl::ChannelConfig>& tx_configs,
+                            int iterations,
+                            uint32_t max_allowed_overhead_us,
+                            bool& out_passed) {
+    fl::json metric = fl::json::object();
+    out_passed = false;
+
+    metric.set("requested", true);
+    metric.set("supported", false);
+    metric.set("driver", driver_name.c_str());
+
+    if (iterations < 1) {
+        metric.set("message", "iterations must be >= 1");
+        return metric;
+    }
+    if (tx_configs.empty()) {
+        metric.set("message", "no channel configs");
+        return metric;
+    }
+    for (fl::size i = 0; i < tx_configs.size(); i++) {
+        if (tx_configs[i].isSpi()) {
+            metric.set("message", "clocked SPI timing metric is not supported");
+            return metric;
+        }
+    }
+
+    fl::vector<fl::ChannelConfig> sample_configs = tx_configs;
+    fl::vector<fl::shared_ptr<fl::Channel>> channels;
+    for (fl::size i = 0; i < sample_configs.size(); i++) {
+        fl::ChannelConfig channel_config(
+            sample_configs[i].getDataPin(),
+            timing,
+            sample_configs[i].mLeds,
+            sample_configs[i].rgb_order);
+        fl::shared_ptr<fl::Channel> channel = FastLED.add(channel_config);
+        if (!channel) {
+            FastLED.clear(ClearFlags::CHANNELS);
+            metric.set("message", "failed to create channel");
+            return metric;
+        }
+        channels.push_back(channel);
+    }
+
+    ScopedFastLedBrightness scoped_brightness(255);
+    for (fl::size lane = 0; lane < sample_configs.size(); lane++) {
+        fill_solid(sample_configs[lane].mLeds.data(),
+                   sample_configs[lane].mLeds.size(),
+                   CRGB::Black);
+    }
+    FastLED.show();
+    if (!FastLED.wait(1000)) {
+        FastLED.clear(ClearFlags::CHANNELS);
+        metric.set("message", "warmup wait timeout");
+        return metric;
+    }
+    delay(2);
+
+    const uint32_t expected_wire_us =
+        expectedClocklessWireUs(timing, maxLaneLeds(sample_configs));
+    uint32_t min_show_us = 0xFFFFFFFFu;
+    uint32_t max_show_us = 0;
+    uint32_t min_wait_us = 0xFFFFFFFFu;
+    uint32_t max_wait_us = 0;
+    uint32_t min_total_us = 0xFFFFFFFFu;
+    uint32_t max_total_us = 0;
+    uint32_t min_overhead_us = 0xFFFFFFFFu;
+    uint32_t max_overhead_us = 0;
+    uint64_t sum_show_us = 0;
+    uint64_t sum_wait_us = 0;
+    uint64_t sum_total_us = 0;
+    uint64_t sum_overhead_us = 0;
+    int samples = 0;
+    bool timed_out = false;
+
+    for (int sample = 0; sample < iterations; sample++) {
+        for (fl::size lane = 0; lane < sample_configs.size(); lane++) {
+            const uint8_t r = static_cast<uint8_t>(31 + sample * 17 + lane * 11);
+            const uint8_t g = static_cast<uint8_t>(67 + sample * 23 + lane * 7);
+            const uint8_t b = static_cast<uint8_t>(103 + sample * 29 + lane * 5);
+            fill_solid(sample_configs[lane].mLeds.data(),
+                       sample_configs[lane].mLeds.size(),
+                       CRGB(r, g, b));
+        }
+
+        const uint32_t t0 = micros();
+        FastLED.show();
+        const uint32_t t1 = micros();
+        const bool ok = FastLED.wait(1000);
+        const uint32_t t2 = micros();
+        if (!ok) {
+            timed_out = true;
+            break;
+        }
+
+        const uint32_t show_us = t1 - t0;
+        const uint32_t wait_us = t2 - t1;
+        const uint32_t total_us = t2 - t0;
+        const uint32_t overhead_us =
+            total_us > expected_wire_us ? total_us - expected_wire_us : 0;
+
+        if (show_us < min_show_us) min_show_us = show_us;
+        if (show_us > max_show_us) max_show_us = show_us;
+        if (wait_us < min_wait_us) min_wait_us = wait_us;
+        if (wait_us > max_wait_us) max_wait_us = wait_us;
+        if (total_us < min_total_us) min_total_us = total_us;
+        if (total_us > max_total_us) max_total_us = total_us;
+        if (overhead_us < min_overhead_us) min_overhead_us = overhead_us;
+        if (overhead_us > max_overhead_us) max_overhead_us = overhead_us;
+
+        sum_show_us += show_us;
+        sum_wait_us += wait_us;
+        sum_total_us += total_us;
+        sum_overhead_us += overhead_us;
+        samples++;
+    }
+
+    FastLED.clear(ClearFlags::CHANNELS);
+
+    metric.set("supported", true);
+    metric.set("samples", static_cast<int64_t>(samples));
+    metric.set("iterations", static_cast<int64_t>(iterations));
+    metric.set("expected_wire_us", static_cast<int64_t>(expected_wire_us));
+    metric.set("max_allowed_overhead_us",
+               static_cast<int64_t>(max_allowed_overhead_us));
+
+    if (samples == 0) {
+        metric.set("passed", false);
+        metric.set("message", timed_out ? "timing wait timeout" : "no samples");
+        return metric;
+    }
+
+    metric.set("min_show_us", static_cast<int64_t>(min_show_us));
+    metric.set("max_show_us", static_cast<int64_t>(max_show_us));
+    metric.set("avg_show_us",
+               static_cast<int64_t>(sum_show_us / static_cast<uint64_t>(samples)));
+    metric.set("min_wait_us", static_cast<int64_t>(min_wait_us));
+    metric.set("max_wait_us", static_cast<int64_t>(max_wait_us));
+    metric.set("avg_wait_us",
+               static_cast<int64_t>(sum_wait_us / static_cast<uint64_t>(samples)));
+    metric.set("min_total_us", static_cast<int64_t>(min_total_us));
+    metric.set("max_total_us", static_cast<int64_t>(max_total_us));
+    metric.set("avg_total_us",
+               static_cast<int64_t>(sum_total_us / static_cast<uint64_t>(samples)));
+    metric.set("min_overhead_us", static_cast<int64_t>(min_overhead_us));
+    metric.set("max_overhead_us", static_cast<int64_t>(max_overhead_us));
+    metric.set("avg_overhead_us",
+               static_cast<int64_t>(sum_overhead_us / static_cast<uint64_t>(samples)));
+
+    out_passed = !timed_out && max_overhead_us <= max_allowed_overhead_us;
+    metric.set("passed", out_passed);
+    if (timed_out) {
+        metric.set("message", "timing wait timeout");
+    } else {
+        metric.set("message", out_passed ? "tight timing within budget"
+                                         : "tight timing exceeded budget");
+    }
+    return metric;
+}
+
+} // namespace
 
 // ============================================================================
 // AutoResearchRemoteControl Private Helper Functions
@@ -269,6 +471,39 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
         use_legacy_api = config["useLegacyApi"].as_bool().value();
     }
 
+    // 9. Extract tightTiming (optional, default: false)
+    bool measure_tight_timing = false;
+    if (config.contains("tightTiming") && config["tightTiming"].is_bool()) {
+        measure_tight_timing = config["tightTiming"].as_bool().value();
+    }
+
+    int tight_timing_iterations = 8;
+    if (config.contains("tightTimingIterations") &&
+        config["tightTimingIterations"].is_int()) {
+        tight_timing_iterations =
+            static_cast<int>(config["tightTimingIterations"].as_int().value());
+        if (tight_timing_iterations < 1 || tight_timing_iterations > 64) {
+            response.set("success", false);
+            response.set("error", "InvalidTightTimingIterations");
+            response.set("message", "tightTimingIterations must be in [1, 64]");
+            return response;
+        }
+    }
+
+    uint32_t tight_timing_max_overhead_us = 2000;
+    if (config.contains("tightTimingMaxOverheadUs") &&
+        config["tightTimingMaxOverheadUs"].is_int()) {
+        const int max_overhead =
+            static_cast<int>(config["tightTimingMaxOverheadUs"].as_int().value());
+        if (max_overhead < 1) {
+            response.set("success", false);
+            response.set("error", "InvalidTightTimingMaxOverheadUs");
+            response.set("message", "tightTimingMaxOverheadUs must be >= 1");
+            return response;
+        }
+        tight_timing_max_overhead_us = static_cast<uint32_t>(max_overhead);
+    }
+
     // Legacy API: all pins must be in range 0-8 (compile-time template range)
     // Multi-lane uses consecutive pins starting at pin_tx
     if (use_legacy_api) {
@@ -387,6 +622,8 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
     bool passed = false;
     uint32_t show_duration_ms = 0;
     fl::vector<fl::RunResult> run_results;
+    fl::json tight_timing_response = fl::json::object();
+    bool tight_timing_passed = true;
 
     {
         // Note: ScopedLogDisable removed to enable diagnostic output during test execution.
@@ -414,6 +651,34 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
         passed = (total_tests > 0) && (passed_tests == total_tests);
     }
 
+    if (measure_tight_timing) {
+        if (use_legacy_api) {
+            tight_timing_passed = false;
+            tight_timing_response.set("requested", true);
+            tight_timing_response.set("supported", false);
+            tight_timing_response.set("passed", false);
+            tight_timing_response.set("driver", driver_name.c_str());
+            tight_timing_response.set("message", "legacy API timing metric is not supported");
+        } else {
+            tight_timing_response = measureTightTiming(
+                driver_name,
+                timing_config.timing,
+                tx_configs,
+                tight_timing_iterations,
+                tight_timing_max_overhead_us,
+                tight_timing_passed);
+        }
+        bool tight_timing_supported = false;
+        if (tight_timing_response.contains("supported") &&
+            tight_timing_response["supported"].is_bool()) {
+            tight_timing_supported =
+                tight_timing_response["supported"].as_bool().value();
+        }
+        if (tight_timing_supported) {
+            passed = passed && tight_timing_passed;
+        }
+    }
+
     uint32_t duration_ms = millis() - start_ms;
 
     // ========== RESPONSE ==========
@@ -434,6 +699,9 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
     response.set("pattern", pattern.c_str());
     response.set("useLegacyApi", use_legacy_api);
     response.set("frameCount", static_cast<int64_t>(frame_count));
+    if (measure_tight_timing) {
+        response.set("tightTiming", tight_timing_response);
+    }
 
     // Free run_results before building response to reclaim heap
     // Only serialize pattern details when tests FAIL (saves heap on passing tests)
@@ -1088,6 +1356,380 @@ void AutoResearchRemoteControl::registerFunctions(fl::shared_ptr<AutoResearchSta
         return response;
     });
 
+    // Register "flexioRxBenchmark" — square-wave validation for the new
+    // FlexIO RX backend (Phase 2 of FastLED#2764).
+    //
+    // Drives `tx_pin` with a `frequency_hz` square wave via the Teensy core's
+    // `analogWriteFrequency` PWM, configures an RxChannel on `rx_pin` using
+    // `RxBackend::FLEXIO`, captures for `duration_ms`, and reports per-period
+    // statistics: count, mean ns, σ ns, min ns, max ns.
+    //
+    // Args (positional, all optional with defaults):
+    //   {
+    //     "frequency_hz": int = 1000,
+    //     "duration_ms":  int = 100,
+    //     "tx_pin":       int = 3,   // matches GPIO 3↔4 jumper
+    //     "rx_pin":       int = 4
+    //   }
+    //
+    // Teensy-4-only because FLEXIO1 is iMXRT1062-specific. Other platforms
+    // get a clean "not supported" response so the RPC harness can still
+    // round-trip.
+    mRemote->bind("flexioRxBenchmark", [this](const fl::json& args) -> fl::json {
+        fl::json response = fl::json::object();
+#if !defined(FL_IS_TEENSY_4X)
+        (void)args;
+        response.set("success", false);
+        response.set("error", "PlatformNotSupported");
+        response.set("message",
+                     "flexioRxBenchmark is Teensy 4.x-only (FLEXIO1 capture).");
+        return response;
+#else
+        // Parse args
+        int frequency_hz = 1000;
+        int duration_ms  = 100;
+        int tx_pin       = 3;
+        int rx_pin       = 4;
+        if (args.is_array() && args.size() >= 1 && args[0].is_object()) {
+            fl::json cfg = args[0];
+            if (cfg.contains("frequency_hz") && cfg["frequency_hz"].is_int()) {
+                frequency_hz = static_cast<int>(cfg["frequency_hz"].as_int().value());
+            }
+            if (cfg.contains("duration_ms") && cfg["duration_ms"].is_int()) {
+                duration_ms = static_cast<int>(cfg["duration_ms"].as_int().value());
+            }
+            if (cfg.contains("tx_pin") && cfg["tx_pin"].is_int()) {
+                tx_pin = static_cast<int>(cfg["tx_pin"].as_int().value());
+            }
+            if (cfg.contains("rx_pin") && cfg["rx_pin"].is_int()) {
+                rx_pin = static_cast<int>(cfg["rx_pin"].as_int().value());
+            }
+        }
+        if (frequency_hz < 1 || frequency_hz > 5000000 ||
+            duration_ms < 1 || duration_ms > 5000) {
+            response.set("success", false);
+            response.set("error", "InvalidArgs");
+            response.set("message",
+                         "frequency_hz in [1, 5_000_000]; duration_ms in [1, 5000].");
+            return response;
+        }
+
+        // 1. Drive the TX pin with a square wave.
+        analogWriteFrequency(tx_pin, (float)frequency_hz);
+        analogWrite(tx_pin, 128);  // 50% duty
+
+        // 2. Create the FlexIO RX channel.
+        // Width budget — size the edge buffer for the actual capture window:
+        //   expected_edges = 2 * frequency_hz * duration_ms / 1000     (transitions)
+        //   target = expected_edges * 1.5  (50% headroom for jitter/skew)
+        // Clamped to [1024, 16384] so the DMA buffer stays reasonable and
+        // matches the FlexIO RX driver's internal cap.
+        fl::RxChannelConfig rx_cfg(rx_pin, fl::RxBackend::FLEXIO);
+        const fl::u64 expected_edges =
+            (fl::u64)2 * (fl::u64)frequency_hz * (fl::u64)duration_ms / 1000ULL;
+        fl::u64 target = expected_edges + expected_edges / 2;  // +50%
+        if (target < 1024ULL) target = 1024ULL;
+        if (target > 16384ULL) target = 16384ULL;
+        rx_cfg.edge_capacity = (size_t)target;
+        rx_cfg.start_low = false;  // PWM output idles in either state, just track transitions
+        auto rx_channel = fl::RxChannel::create(rx_cfg);
+        if (!rx_channel) {
+            analogWrite(tx_pin, 0);
+            response.set("success", false);
+            response.set("error", "RxCreateFailed");
+            response.set("message",
+                         "Failed to create FlexIO RX channel on pin (no FLEXIO1 mapping).");
+            return response;
+        }
+        if (!rx_channel->begin(rx_cfg)) {
+            analogWrite(tx_pin, 0);
+            response.set("success", false);
+            response.set("error", "RxBeginFailed");
+            response.set("message",
+                         "RxChannel::begin() returned false (see device WARN log).");
+            return response;
+        }
+
+        // 3. Let it capture for the requested window.
+        rx_channel->wait((u32)duration_ms);
+
+        // 4. Stop the square wave so the line is quiet for stats computation.
+        analogWrite(tx_pin, 0);
+
+        // 5. Pull captured edges out.
+        fl::vector<fl::EdgeTime> edges;
+        edges.assign(rx_cfg.edge_capacity, fl::EdgeTime());
+        size_t edges_captured =
+            rx_channel->getRawEdgeTimes(fl::span<fl::EdgeTime>(edges), 0);
+        edges.resize(edges_captured);
+
+        // 6. Compute period statistics. A "period" = duration_high + duration_low
+        //    for adjacent edges, so we iterate in pairs.
+        fl::u64 sum_ns = 0;
+        fl::u64 sum_sq_ns = 0;
+        fl::u32 min_ns = 0xFFFFFFFFu;
+        fl::u32 max_ns = 0;
+        size_t periods = 0;
+        for (size_t i = 0; i + 1 < edges_captured; i += 2) {
+            const fl::u32 period_ns =
+                (fl::u32)edges[i].ns + (fl::u32)edges[i + 1].ns;
+            if (period_ns == 0) continue;
+            sum_ns += period_ns;
+            sum_sq_ns += (fl::u64)period_ns * (fl::u64)period_ns;
+            if (period_ns < min_ns) min_ns = period_ns;
+            if (period_ns > max_ns) max_ns = period_ns;
+            ++periods;
+        }
+        fl::u32 mean_ns = 0;
+        fl::u32 sigma_ns = 0;
+        if (periods > 0) {
+            mean_ns = (fl::u32)(sum_ns / (fl::u64)periods);
+            const fl::u64 mean64 = (fl::u64)mean_ns;
+            const fl::u64 var =
+                periods > 0 ? (sum_sq_ns / (fl::u64)periods) - (mean64 * mean64)
+                            : 0;
+            // Integer sqrt for σ — adequate for the tolerance ranges we
+            // assert in Phase 2 (σ < 100 ns at 100 kHz).
+            fl::u32 s = 0;
+            while ((fl::u64)(s + 1) * (fl::u64)(s + 1) <= var) ++s;
+            sigma_ns = s;
+        }
+        if (min_ns == 0xFFFFFFFFu) min_ns = 0;
+
+        response.set("success", true);
+        response.set("frequency_hz", static_cast<int64_t>(frequency_hz));
+        response.set("duration_ms", static_cast<int64_t>(duration_ms));
+        response.set("tx_pin", static_cast<int64_t>(tx_pin));
+        response.set("rx_pin", static_cast<int64_t>(rx_pin));
+        response.set("edges_captured", static_cast<int64_t>(edges_captured));
+        response.set("periods", static_cast<int64_t>(periods));
+        response.set("period_mean_ns", static_cast<int64_t>(mean_ns));
+        response.set("period_sigma_ns", static_cast<int64_t>(sigma_ns));
+        response.set("period_min_ns", static_cast<int64_t>(min_ns));
+        response.set("period_max_ns", static_cast<int64_t>(max_ns));
+        return response;
+#endif
+    });
+
+    // Register "flexioObjectFledTest" — end-to-end ObjectFLED TX → FlexIO RX
+    // loopback verification (Phase 3 of FastLED#2764).
+    //
+    // Drives a small WS2812 pattern through `Bus::OBJECT_FLED` on `tx_pin`,
+    // captures the wire signal back through the new `RxBackend::FLEXIO` on
+    // `rx_pin`, decodes the bit stream against WS2812B-V5 timing, and reports
+    // how many bytes matched the transmitted pattern.
+    //
+    // Test cases (parent issue Phase 3 table):
+    //   0 — Red single LED            (1 LED, 0xFF0000 → wire-order GRB 00,FF,00)
+    //   1 — RGB three-LED chain       (3 LEDs)
+    //   2 — All zeros                 (1 LED, 0x000000 — T0H/T0L fidelity)
+    //   3 — All ones                  (1 LED, 0xFFFFFF — T1H/T1L fidelity)
+    //   4 — 100-LED alternating R/G/B (long capture, watchdog-safety)
+    //
+    // Args (positional, all optional):
+    //   { "test_case": int = 0,
+    //     "tx_pin":    int = 3,   // matches GPIO 3↔4 jumper
+    //     "rx_pin":    int = 4,
+    //     "capture_ms": int = 50 }
+    //
+    // Returns:
+    //   { success, test_case, num_leds, expected_bytes, decoded_bytes,
+    //     matched, mismatched, edges_captured }
+    //
+    // Teensy-4-only — FLEXIO1 is iMXRT1062-specific. ObjectFLED also relies
+    // on Teensy 4-core APIs, so non-Teensy builds return `PlatformNotSupported`.
+    mRemote->bind("flexioObjectFledTest", [this](const fl::json& args) -> fl::json {
+        fl::json response = fl::json::object();
+#if !defined(FL_IS_TEENSY_4X)
+        (void)args;
+        response.set("success", false);
+        response.set("error", "PlatformNotSupported");
+        response.set("message",
+                     "flexioObjectFledTest is Teensy 4.x-only (FLEXIO1 RX + "
+                     "Teensy-core ObjectFLED driver).");
+        return response;
+#else
+        // Parse args
+        int test_case = 0;
+        int tx_pin    = 3;
+        int rx_pin    = 4;
+        int capture_ms = 50;
+        if (args.is_array() && args.size() >= 1 && args[0].is_object()) {
+            fl::json cfg = args[0];
+            if (cfg.contains("test_case") && cfg["test_case"].is_int()) {
+                test_case = static_cast<int>(cfg["test_case"].as_int().value());
+            }
+            if (cfg.contains("tx_pin") && cfg["tx_pin"].is_int()) {
+                tx_pin = static_cast<int>(cfg["tx_pin"].as_int().value());
+            }
+            if (cfg.contains("rx_pin") && cfg["rx_pin"].is_int()) {
+                rx_pin = static_cast<int>(cfg["rx_pin"].as_int().value());
+            }
+            if (cfg.contains("capture_ms") && cfg["capture_ms"].is_int()) {
+                capture_ms = static_cast<int>(cfg["capture_ms"].as_int().value());
+            }
+        }
+        if (test_case < 0 || test_case > 4 ||
+            capture_ms < 1 || capture_ms > 5000) {
+            response.set("success", false);
+            response.set("error", "InvalidArgs");
+            response.set("message",
+                         "test_case in [0,4]; capture_ms in [1, 5000].");
+            return response;
+        }
+
+        // 1. Build the test pattern. Fixed upper bound (100 LEDs) covers
+        //    case 4 — the larger cases reuse the same static buffer.
+        static CRGB leds_buf[100];
+        int num_leds = 0;
+        switch (test_case) {
+            case 0:
+                num_leds = 1;
+                leds_buf[0] = CRGB::Red;
+                break;
+            case 1:
+                num_leds = 3;
+                leds_buf[0] = CRGB::Red;
+                leds_buf[1] = CRGB::Green;
+                leds_buf[2] = CRGB::Blue;
+                break;
+            case 2:
+                num_leds = 1;
+                leds_buf[0] = CRGB::Black;
+                break;
+            case 3:
+                num_leds = 1;
+                leds_buf[0] = CRGB(0xFF, 0xFF, 0xFF);
+                break;
+            case 4:
+                num_leds = 100;
+                for (int i = 0; i < 100; ++i) {
+                    leds_buf[i] = (i % 3 == 0) ? CRGB::Red
+                                : (i % 3 == 1) ? CRGB::Green
+                                               : CRGB::Blue;
+                }
+                break;
+        }
+
+        // 2. Build the expected wire-order byte stream (WS2812 is GRB).
+        fl::vector<u8> expected;
+        expected.reserve((size_t)num_leds * 3);
+        for (int i = 0; i < num_leds; ++i) {
+            expected.push_back(leds_buf[i].g);
+            expected.push_back(leds_buf[i].r);
+            expected.push_back(leds_buf[i].b);
+        }
+
+        // 3. Set up FlexIO RX. Size the edge buffer for 24 bits per LED ×
+        //    2 transitions per bit, with 25% headroom.
+        const size_t expected_edges = (size_t)num_leds * 24u * 2u;
+        size_t edge_capacity = expected_edges + expected_edges / 4u + 64u;
+        if (edge_capacity > 16384u) edge_capacity = 16384u;
+
+        fl::RxChannelConfig rx_cfg(rx_pin, fl::RxBackend::FLEXIO);
+        rx_cfg.edge_capacity = edge_capacity;
+        rx_cfg.start_low = true;
+        auto rx_channel = fl::RxChannel::create(rx_cfg);
+        if (!rx_channel || !rx_channel->begin(rx_cfg)) {
+            response.set("success", false);
+            response.set("error", "RxBeginFailed");
+            response.set("message",
+                         "Failed to bring up FlexIO RX on the requested pin "
+                         "(check kFlexIo1Pins[] mapping).");
+            return response;
+        }
+
+        // 4. Configure ObjectFLED TX via FastLED.add().
+        fl::ChannelOptions opts;
+        opts.mBus = fl::Bus::OBJECT_FLED;
+        auto resolved_timing  = fl::makeTimingConfig<fl::TIMING_WS2812B_V5>();
+        auto resolved_encoder = fl::encoder_for<fl::TIMING_WS2812B_V5>();
+        fl::NamedTimingConfig timing_cfg(resolved_timing, "WS2812B-V5",
+                                         resolved_encoder);
+        fl::ChannelConfig tx_cfg(
+            tx_pin,
+            timing_cfg.timing,
+            fl::span<CRGB>(leds_buf, (size_t)num_leds),
+            RGB,
+            opts);
+        auto tx_channel = FastLED.add(tx_cfg);
+        if (!tx_channel) {
+            response.set("success", false);
+            response.set("error", "TxAddFailed");
+            response.set("message",
+                         "FastLED.add() rejected the ObjectFLED ChannelConfig.");
+            return response;
+        }
+
+        // 5. Trigger TX. FastLED.show() schedules the DMA and returns once
+        //    the frame has been queued. The RX wait must be long enough to
+        //    cover BOTH the TX transmission time AND the capture-buffer
+        //    fill — otherwise teardown happens mid-frame and the hardware
+        //    can be left in a bad state. Compute a minimum from the actual
+        //    WS2812 timing (1.25 µs per bit, 24 bits per LED, plus reset
+        //    gap) and use the larger of the caller's `capture_ms` and that
+        //    minimum.
+        FastLED.show();
+        const u32 ws2812_tx_us =
+            (u32)num_leds * 24u * 13u / 10u + 100u;  // 1.25 µs/bit + reset
+        const u32 min_capture_ms = (ws2812_tx_us + 999u) / 1000u + 10u;
+        const u32 effective_capture_ms = ((u32)capture_ms > min_capture_ms)
+                                              ? (u32)capture_ms
+                                              : min_capture_ms;
+        rx_channel->wait(effective_capture_ms);
+
+        // 6. Decode the captured edge stream against WS2812 4-phase timing.
+        const fl::ChipsetTiming ws2812_timing =
+            fl::to_runtime_timing<fl::TIMING_WS2812B_V5>();
+        fl::ChipsetTiming4Phase rx_timing =
+            fl::make4PhaseTiming(ws2812_timing);
+        fl::vector<u8> decoded;
+        decoded.assign(expected.size() + 16u, 0u);
+        auto decode_result =
+            rx_channel->decode(rx_timing, fl::span<u8>(decoded));
+
+        // 7. Compare decoded bytes against expected.
+        u32 decoded_bytes = 0u;
+        if (decode_result) {
+            decoded_bytes = decode_result.value();
+        }
+        const size_t cmp_n = (decoded_bytes < expected.size())
+                                 ? (size_t)decoded_bytes
+                                 : expected.size();
+        size_t matched = 0;
+        size_t mismatched = 0;
+        for (size_t i = 0; i < cmp_n; ++i) {
+            if (decoded[i] == expected[i]) ++matched; else ++mismatched;
+        }
+        if (decoded_bytes < expected.size()) {
+            mismatched += expected.size() - decoded_bytes;
+        }
+
+        // 8. Read raw edge count for diagnostics.
+        fl::vector<fl::EdgeTime> edges;
+        edges.assign(edge_capacity, fl::EdgeTime());
+        const size_t edges_captured =
+            rx_channel->getRawEdgeTimes(fl::span<fl::EdgeTime>(edges), 0);
+
+        // 9. Tear the TX channel back down so subsequent tests can use the
+        //    same pin (FastLED.clear(ClearFlags::CHANNELS) matches the
+        //    pattern used by runSingleTestImpl in this file).
+        FastLED.clear(ClearFlags::CHANNELS);
+
+        response.set("success", mismatched == 0 && decoded_bytes == expected.size());
+        response.set("test_case", static_cast<int64_t>(test_case));
+        response.set("tx_pin", static_cast<int64_t>(tx_pin));
+        response.set("rx_pin", static_cast<int64_t>(rx_pin));
+        response.set("num_leds", static_cast<int64_t>(num_leds));
+        response.set("expected_bytes", static_cast<int64_t>(expected.size()));
+        response.set("decoded_bytes", static_cast<int64_t>(decoded_bytes));
+        response.set("matched", static_cast<int64_t>(matched));
+        response.set("mismatched", static_cast<int64_t>(mismatched));
+        response.set("edges_captured", static_cast<int64_t>(edges_captured));
+        return response;
+#endif
+    });
+
     // Register "setDebug" function - enable/disable runtime debug logging
     mRemote->bind("setDebug", [this](const fl::json& args) -> fl::json {
         fl::json response = fl::json::object();
@@ -1586,6 +2228,14 @@ void AutoResearchRemoteControl::registerFunctions(fl::shared_ptr<AutoResearchSta
         testSimdBenchmark_fn.set("description", "Benchmark multiply speed: float vs s16x16 vs s16x16x4 SIMD");
         functions.push_back(testSimdBenchmark_fn);
 
+        fl::json animartrixPerlinBench_fn = fl::json::object();
+        animartrixPerlinBench_fn.set("name", "animartrixPerlinBench");
+        animartrixPerlinBench_fn.set("phase", "Phase 4: Utility");
+        animartrixPerlinBench_fn.set("args", "[{iterations}] (optional, default 100, max 10000)");
+        animartrixPerlinBench_fn.set("returns", "{success, iterations, pnoise_calls_per_iter, pnoise_float_us, pnoise_i16_us, speedup_x1000}");
+        animartrixPerlinBench_fn.set("description", "Animartrix-representative Perlin noise bench: scalar float pnoise vs s16x16 fixed-point pnoise2d (16x16 grid per iter, mirrors a real frame). Answers: how much does fixed-point beat float for Animartrix's hot path on this hardware?");
+        functions.push_back(animartrixPerlinBench_fn);
+
         fl::json wave8ExpandBenchmark_fn = fl::json::object();
         wave8ExpandBenchmark_fn.set("name", "wave8ExpandBenchmark");
         wave8ExpandBenchmark_fn.set("phase", "Phase 4: Utility");
@@ -1610,9 +2260,25 @@ void AutoResearchRemoteControl::registerFunctions(fl::shared_ptr<AutoResearchSta
         parlioStreamValidate_fn.set("description", "Functional test of the PARLIO ISR-chunked streaming engine (#2548). Drives N back-to-back FastLED.show() calls through the production engine (which uses BF1+pipe4 on 16-lane Wave8 since #2559) and verifies all complete within timeout. Catches hangs/stalls.");
         functions.push_back(parlioStreamValidate_fn);
 
+        fl::json flexioRxBenchmark_fn = fl::json::object();
+        flexioRxBenchmark_fn.set("name", "flexioRxBenchmark");
+        flexioRxBenchmark_fn.set("phase", "Phase 4: Utility");
+        flexioRxBenchmark_fn.set("args", "[{frequency_hz=1000, duration_ms=100, tx_pin=3, rx_pin=4}] (all optional)");
+        flexioRxBenchmark_fn.set("returns", "{success, frequency_hz, duration_ms, tx_pin, rx_pin, edges_captured, periods, period_mean_ns, period_sigma_ns, period_min_ns, period_max_ns}");
+        flexioRxBenchmark_fn.set("description", "Square-wave validation for the FlexIO RX backend (Teensy 4.x only, FastLED#2764 Phase 2). Drives tx_pin via analogWriteFrequency at 50%% duty, captures via RxBackend::FLEXIO on rx_pin, reports per-period statistics.");
+        functions.push_back(flexioRxBenchmark_fn);
+
+        fl::json flexioObjectFledTest_fn = fl::json::object();
+        flexioObjectFledTest_fn.set("name", "flexioObjectFledTest");
+        flexioObjectFledTest_fn.set("phase", "Phase 4: Utility");
+        flexioObjectFledTest_fn.set("args", "[{test_case=0..4, tx_pin=3, rx_pin=4, capture_ms=50}] (all optional)");
+        flexioObjectFledTest_fn.set("returns", "{success, test_case, tx_pin, rx_pin, num_leds, expected_bytes, decoded_bytes, matched, mismatched, edges_captured}");
+        flexioObjectFledTest_fn.set("description", "End-to-end ObjectFLED TX -> FlexIO RX loopback verification (Teensy 4.x only, FastLED#2764 Phase 3). Drives WS2812 patterns through Bus::OBJECT_FLED, captures via RxBackend::FLEXIO, decodes the bit stream, and reports byte-level match counts. Five fixed test patterns: 0=red, 1=RGB triple, 2=all zeros, 3=all ones, 4=100-LED alternating.");
+        functions.push_back(flexioObjectFledTest_fn);
+
         fl::json response = fl::json::object();
         response.set("success", true);
-        response.set("totalFunctions", static_cast<int64_t>(25));
+        response.set("totalFunctions", static_cast<int64_t>(28));
         response.set("functions", functions);
         return response;
     });
@@ -1705,6 +2371,47 @@ void AutoResearchRemoteControl::registerFunctions(fl::shared_ptr<AutoResearchSta
         div.set("u16x16_us", result.div_u16x16_us);
         response.set("div", div);
 
+        return response;
+    });
+
+    // Register "animartrixPerlinBench" - Animartrix-representative Perlin
+    // noise bench: scalar float (fl::pnoise) vs s16x16 fixed-point
+    // (fl::perlin_i16_optimized::pnoise2d). Same workload that drives every
+    // Animartrix frame — one Perlin lookup per output pixel, 16x16 grid
+    // per iteration. Args: {iterations} (optional, default 100).
+    mRemote->bind("animartrixPerlinBench", [](const fl::json& args) -> fl::json {
+        fl::json response = fl::json::object();
+
+        int iters = 100;
+        fl::json config;
+        if (args.is_object()) {
+            config = args;
+        } else if (args.is_array() && args.size() >= 1 && args[0].is_object()) {
+            config = args[0];
+        }
+        if (!config.is_null() && config.contains("iterations") && config["iterations"].is_int()) {
+            iters = static_cast<int>(config["iterations"].as_int().value());
+            if (iters < 1) iters = 1;
+            if (iters > 10000) iters = 10000;
+        }
+
+        auto result = autoresearch::animartrix_check::runPerlinBenchmark(iters);
+
+        response.set("success", true);
+        response.set("iterations", result.iterations);
+        // Workload-per-iter is 16*16 = 256 pnoise calls. Surface this so
+        // the client can compute per-call timings without hardcoding.
+        response.set("pnoise_calls_per_iter", static_cast<int64_t>(256));
+        response.set("pnoise_float_us", result.pnoise_float_us);
+        response.set("pnoise_i16_us", result.pnoise_i16_us);
+        // Speedup expressed as float / i16 (>1 means i16 wins). Computed
+        // host-side too for cross-check; this is just convenience.
+        if (result.pnoise_i16_us > 0) {
+            double speedup = static_cast<double>(result.pnoise_float_us) /
+                             static_cast<double>(result.pnoise_i16_us);
+            // Encode as basis-points (1000ths) to avoid float in the json wire fmt
+            response.set("speedup_x1000", static_cast<int64_t>(speedup * 1000.0));
+        }
         return response;
     });
 

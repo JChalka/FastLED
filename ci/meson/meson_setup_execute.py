@@ -27,6 +27,7 @@ from ci.meson.meson_markers import (
     _write_configuration_markers,
     cleanup_stale_meson_lockfile,
     inject_ar_optimization_patches,
+    inject_zccache_wrapping,
 )
 from ci.meson.meson_setup_phases import (
     CompilerDetection,
@@ -153,9 +154,16 @@ def write_meson_native_file(
     native_file_path: Path,
     compiler: CompilerDetection,
 ) -> None:
-    """Generate/update the Meson native file with tool paths + platform info."""
+    """Generate/update the Meson native file with tool paths + platform info.
+
+    The compiler entries point at the BARE ctc-clang/ctc-clang++ binaries.
+    zccache wrapping is applied later as a post-patch on ``build.ninja`` via
+    ``inject_zccache_wrapping`` so the meson configure-phase probes (e.g.
+    ``-xc++ -E -v -``) run against the bare compiler and complete in <1s
+    instead of timing out under zccache. See issue #2714.
+    """
     try:
-        fast = _resolve_fast_native_entries(compiler.cache_binary)
+        fast = _resolve_fast_native_entries()
         if fast.cc is not None:
             c_compiler = fast.cc
             cpp_compiler = fast.cxx
@@ -317,6 +325,14 @@ def handle_skip_meson_setup(
     )
 
     inject_ar_optimization_patches(build_dir, source_dir)
+    if compiler.cache_binary and not inject_zccache_wrapping(
+        build_dir, compiler.cache_binary
+    ):
+        _ts_print(
+            f"[MESON] Warning: Failed to inject zccache wrapping into build.ninja "
+            f"(build_dir={build_dir}, zccache={compiler.cache_binary})",
+            file=sys.stderr,
+        )
     if normalize_meson_private_include_paths(build_dir):
         _ts_print("[MESON] Normalized private include paths for zccache strict mode")
     _enforce_strict_path_violations(build_dir)
@@ -529,6 +545,39 @@ def build_meson_setup_cmd(
     return cmd
 
 
+_ZCCACHE_MESON_HIT_MARKER = "[zccache-meson] hit"
+_PCH_ARTIFACT_SUFFIXES = (".pch", ".pch.input_hash", ".d.cache")
+
+
+def _purge_restored_pch_artifacts(build_dir: Path) -> None:
+    """Delete PCH binaries and their compile_pch.py sidecars from build_dir.
+
+    zccache meson snapshots capture the whole build dir (zackees/zccache#710),
+    so a restore can resurrect a stale clang PCH whose embedded file identities
+    silently defeat ``#pragma once`` dedup — along with the ``.input_hash`` /
+    ``.d.cache`` sidecars that make ``compile_pch.py`` skip rebuilding it
+    forever. Purging after a snapshot hit forces a fresh PCH compile.
+    """
+    removed = 0
+    for root, _dirs, files in os.walk(build_dir):
+        for name in files:
+            if name.endswith(_PCH_ARTIFACT_SUFFIXES):
+                path = Path(root) / name
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError as e:
+                    _ts_print(
+                        f"[MESON] Warning: could not delete {path}: {e}",
+                        file=sys.stderr,
+                    )
+    if removed:
+        _ts_print(
+            f"[MESON] Purged {removed} PCH artifact(s) restored by zccache "
+            f"meson snapshot (zackees/zccache#710)"
+        )
+
+
 def run_meson_setup_command(
     *,
     cmd: list[str],
@@ -599,6 +648,9 @@ def run_meson_setup_command(
 
         _ts_print("[MESON] Setup successful")
 
+        if _ZCCACHE_MESON_HIT_MARKER in stdout:
+            _purge_restored_pch_artifacts(build_dir)
+
         _write_configuration_markers(
             build_mode_marker=markers.build_mode,
             build_mode=build_mode,
@@ -628,6 +680,14 @@ def run_meson_setup_command(
         )
 
         inject_ar_optimization_patches(build_dir, source_dir)
+        if compiler.cache_binary and not inject_zccache_wrapping(
+            build_dir, compiler.cache_binary
+        ):
+            _ts_print(
+                f"[MESON] Warning: Failed to inject zccache wrapping into build.ninja "
+                f"(build_dir={build_dir}, zccache={compiler.cache_binary})",
+                file=sys.stderr,
+            )
         if normalize_meson_private_include_paths(build_dir):
             _ts_print(
                 "[MESON] Normalized private include paths for zccache strict mode"
