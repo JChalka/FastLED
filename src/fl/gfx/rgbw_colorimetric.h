@@ -17,12 +17,13 @@
 ///   * wx_lp_legacy solves a chromaticity-preserving maximum-W endpoint.
 ///   * boosted/overdrive intentionally trades chromaticity for more W/luminance.
 ///
-/// Strict-mode full-scale policy:
-///   By default, strict sub-gamut mode preserves the intuitive full-scale
-///   endpoint: if any input RGB channel is full-scale, at least one output
-///   RGBW channel is also full-scale.  This is a uniform post-solve scale, so
-///   it preserves solved chromaticity/topology while avoiding top-end loss
-///   after energy is split into W or another sub-gamut channel.  Define
+/// Strict-mode input-max policy:
+///   By default, strict sub-gamut mode preserves source-drive headroom: after
+///   the colorimetric solve, max(output RGBW) is uniformly scaled up to track
+///   max(input RGB) when the solve would otherwise fall below it.  This is
+///   continuous across the whole range, not only at exactly 65535, so 65534
+///   does not suddenly drop to an unscaled endpoint while 65535 gets boosted.
+///   Uniform scaling preserves solved chromaticity/topology.  Define
 ///   FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0 to opt out and keep
 ///   the exact colorimetric/Y-preserving endpoint.
 ///
@@ -395,10 +396,11 @@ inline void build_profile_cache(const DiodeProfile* p,
 //      not raw passthrough.
 //   4. Interior inputs split source value from chroma, solve the full-chroma
 //      endpoint in one of {RGW, RBW, BGW}, then scale by source value.
-//   5. Unless FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0, full-scale
-//      source inputs get a final uniform max-preserve scale so max(output)=1.
-//      This keeps saturated source endpoints visually full-scale after RGBW
-//      energy splitting while preserving xy/topology.
+//   5. Unless FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0, the final
+//      tuple gets a continuous uniform input-max scale so max(output) tracks
+//      max(input).  This avoids top-end discontinuities like 65534 staying
+//      unscaled while 65535 jumps to a full-scale output, while preserving
+//      xy/topology.
 //
 // Returns false only for numerically degenerate profiles / matrices where the
 // caller should fall back to a simpler path.

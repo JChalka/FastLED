@@ -11,13 +11,16 @@
 #include "fl/math/math.h"
 #include "fl/stl/unique_ptr.h"
 
-// Strict sub-gamut full-scale policy.
+// Strict sub-gamut input-max preservation policy.
 //
-// Default ON: when a source RGB tuple contains a full-scale channel, the final
-// strict RGBW output is uniformly scaled so at least one output channel is also
-// full-scale.  This preserves solved chromaticity and legal topology because all
-// active channels are scaled by the same factor, but it changes the absolute Y
-// endpoint from the pure colorimetric solve.
+// Default ON: after the strict colorimetric solve, the final RGBW tuple is
+// uniformly scaled so max(output) tracks max(input).  This is intentionally
+// continuous, not a special case for exactly-full-scale input: a source value of
+// 65534 should not fall back to the unscaled endpoint while 65535 gets boosted.
+// Uniform scaling preserves solved chromaticity and legal topology because all
+// active output channels are multiplied by the same factor.  It does change the
+// absolute-Y endpoint from the pure colorimetric solve, so users who prefer exact
+// Y-preserving behavior can opt out.
 //
 // Opt out with:
 //   -DFASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0
@@ -48,8 +51,9 @@ namespace colorimetric_detail {
 //     Reference strict RGBW solve. Native singles are exact identity; native
 //     dual edges are fixed-topology measured two-emitter solves; interiors
 //     solve a full-chroma endpoint in RGW/RBW/BGW and then apply value.  By
-//     default, saturated source inputs also receive a final uniform
-//     max-preserve scale so max(input)==1 implies max(output)==1.
+//     default, the final tuple receives a continuous uniform input-max
+//     preservation scale so max(output) tracks max(input), avoiding a steep
+//     65534/65535 discontinuity at the top end.
 //
 //   solve_wx_lp_legacy()
 //     Reference white-extraction solve. It maximizes W while preserving target
@@ -282,30 +286,31 @@ static void normalize4_if_needed(float out[4]) FL_NOEXCEPT {
     }
 }
 
-// Strict-mode full-scale endpoint preservation.
+// Strict-mode input-max endpoint preservation.
 //
-// The colorimetric strict solve may split a saturated input across W / sub-gamut
-// channels such that the largest output channel is below 1.0, e.g. an input
-// with R=1 can end up with W=0.85 after the D65/value solve.  That is a valid
-// absolute-Y interpretation, but it is surprising for source-drive semantics:
-// full-scale input has no full-scale output channel.
+// The colorimetric strict solve may split source energy across W / sub-gamut
+// channels such that the largest output channel is below the source value, e.g.
+// input max≈1.0 can end up with W≈0.85 after the D65/value solve.  That is a
+// valid absolute-Y interpretation, but it is surprising for source-drive
+// semantics because a near-max source can produce no near-max output channel.
 //
-// When enabled, this helper applies a uniform post-solve scale only when the
-// source tuple itself is full-scale.  Uniform scaling preserves xy and topology
-// because every active output channel is multiplied by the same factor.  The
-// policy is opt-out for users who prefer the exact Y-preserving endpoint.
-static void preserve_full_scale_input_endpoint(float source_max,
-                                               float out[4]) FL_NOEXCEPT {
+// When enabled, apply a uniform post-solve scale whenever max(output) is below
+// max(input), not only when max(input) is exactly 1.0.  This avoids a steep
+// discontinuity between 65534 and 65535 while preserving xy and topology because
+// every active output channel is multiplied by the same factor.  The policy is
+// opt-out for users who prefer the exact Y-preserving endpoint.
+static void preserve_input_max_endpoint(float source_max,
+                                        float out[4]) FL_NOEXCEPT {
 #if FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX
-    // Half-LSB tolerance for normalized 16-bit source values.
-    constexpr float kFullInputEps = 0.5f / 65535.0f;
+    constexpr float kInputEps = 0.5f / 65535.0f;
     constexpr float kOutputEps = 1e-9f;
-    if (source_max < 1.0f - kFullInputEps) {
+    const float target_max = fl::clamp(source_max, 0.0f, 1.0f);
+    if (target_max <= kInputEps) {
         return;
     }
     const float m = fl::max(fl::max(out[0], out[1]), fl::max(out[2], out[3]));
-    if (m > kOutputEps && m < 1.0f - kFullInputEps) {
-        const float s = 1.0f / m;
+    if (m > kOutputEps && m < target_max - kInputEps) {
+        const float s = target_max / m;
         out[0] *= s; out[1] *= s; out[2] *= s; out[3] *= s;
     }
 #else
@@ -464,7 +469,7 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
     out[2] = full[2] * value;
     out[3] = 0.0f;
     normalize4_if_needed(out);
-    preserve_full_scale_input_endpoint(value, out);
+    preserve_input_max_endpoint(value, out);
     return true;
 }
 
@@ -579,7 +584,7 @@ bool solve_strict_subgamut(const ProfileCache& cache, float s_r,
     out_rgbw[2] = full[2] * value;
     out_rgbw[3] = full[3] * value;
     normalize4_if_needed(out_rgbw);
-    preserve_full_scale_input_endpoint(value, out_rgbw);
+    preserve_input_max_endpoint(value, out_rgbw);
     return true;
 }
 
