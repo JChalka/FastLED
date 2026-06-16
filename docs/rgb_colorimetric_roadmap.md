@@ -33,6 +33,9 @@ a user explicitly selects colorimetric behavior.
 - Do not merge RGB-only solving with RGBW white extraction policy.
 - Do not make LP / W-overdrive behavior part of RGB-only solving; RGB has no
   inner white emitter.
+- Do not treat layered RGBWW/RGBCCT behavior as strict sub-gamut output. The
+  current RGBWW implementation is an overdrive/layered family until a direct
+  strict RGBCCT candidate solver exists.
 - Do not remove the compile-time size gate. Runtime opt-in can be explored, but
   it should complement, not replace, a compile-time gate.
 
@@ -66,20 +69,25 @@ a user explicitly selects colorimetric behavior.
 ## Discrete-Form Requirement
 
 For this work, "compresses well into a discrete form" means the final RGB-only
-algorithm should be expressible as a bounded, MCU-friendly transform:
+and RGBWW/RGBCCT follow-up algorithms should be expressible as bounded,
+MCU-friendly transforms:
 
 - A small fixed set of branches, not an unconstrained optimizer.
 - Profile data precomputed once per active profile / source gamut.
 - Runtime work based on fixed matrix-vector operations, 3x3 solves, projection
   to a triangle, normalization, and quantization.
+- For RGBWW/RGBCCT, ambiguous strict candidates should be selected by explicit
+  policy branches using precomputed profile data, not by a per-pixel global
+  optimizer.
 - Optional LUT support, if added, must have a clear memory formula and bounded
   grid size like the RGBW LUT path.
 - The compile-time-off path must not retain the heavy math in ordinary sketches.
 
 ## Phase 1: RGBW Sub-Gamut Endpoint Scaling
 
-Status: implemented in the current local/workspace RGBW solver shape, pending
-verification evidence before treating it as complete.
+Status: active. The current local/workspace RGBW solver shape has the first
+`scale_to_full_endpoint`-style behavior, but the roadmap now requires an
+explicit endpoint policy axis before treating this family as complete.
 
 Landed or observed work:
 
@@ -96,23 +104,41 @@ Remaining work:
 - Verify the local-fork/workspace implementation against the known motivating
   rows, especially the `h315_s015_v100` style case where W should scale toward
   the source max rather than the extracted split energy.
-- Confirm opt-out behavior when
-  `FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0`.
+- Replace the boolean-only opt-out shape with an explicit endpoint luminance
+  policy that can select:
+  - `y_correct_clip`: preserve the requested target-Y solve until physical
+    clipping, then report/accept the residual.
+  - `rolloff_after_clip`: follow the clipped/Y-correct result near the limit,
+    then apply a smooth knee so post-clip values retain gradation instead of a
+    hard plateau.
+  - `scale_to_full_endpoint`: compatibility/current behavior; solve the
+    chromaticity-preserving endpoint, then scale it by the source/value axis for
+    smoother channel resolution.
 - Confirm topology is preserved after endpoint scaling for native singles,
   native dual edges, and strict interior routes.
+- Apply the same endpoint-policy contract to direct dual-edge solves in RGBW,
+  RGBCCT, and future direct 5+ emitter topologies. For future packages with
+  yellow, violet, or other outer-hull emitters, the policy must distinguish a
+  true anchor solve such as `RGY` or `RBV` from a dual-edge fallback.
+- Record endpoint policy metadata in any verifier rows, LUT summaries, and
+  pass/fail dictionary keys that compare model output against measurements.
 - Add or update focused regression coverage once code changes are allowed.
 
 Acceptance criteria:
 
-- Strict RGBW output max tracks input max unless the opt-out macro is disabled.
-- Uniform scaling never introduces inactive channels.
-- Existing strict sub-gamut chromaticity/topology behavior remains intact.
+- Strict RGBW output follows the selected endpoint policy, and the compatibility
+  policy preserves the current source-max tracking behavior.
+- Endpoint scaling or rolloff never introduces inactive channels.
+- Existing strict sub-gamut chromaticity/topology behavior remains intact under
+  all endpoint policies.
+- Direct dual-edge tests cover clipping, rolloff, and scaled endpoint behavior.
 - Verifier output is recorded in the PR or issue thread.
 
 Likely files:
 
 - `src/fl/gfx/rgbw_colorimetric.cpp.hpp`
 - `src/fl/gfx/rgbw_colorimetric.h`
+- `src/fl/gfx/rgbww.cpp.hpp`
 - `tests/fl/gfx/rgbw_colorimetric.cpp`
 
 ## Phase 2: Extract Portable Colorimetric Response Math
@@ -248,6 +274,95 @@ Likely tests:
   or narrower measured LED profile.
 - Value-ramp rows around projection and normalization boundaries.
 
+## Phase 3A: Clarify and Implement RGBCCT Strict vs Overdrive Families
+
+Status: planned. The current RGBWW implementation should be treated as an
+explicit layered/overdrive family, not as the final strict RGBCCT sub-gamut
+solver.
+
+Goal:
+
+Separate RGBWW/RGBCCT behavior into named families so future code and verifier
+data do not mix strict direct topology solves with layered warm/cool overdrive
+composition.
+
+Current implementation classification:
+
+- `src/fl/gfx/rgbww.cpp.hpp` resolves an active `RgbcctProfile`, computes an
+  eta, then calls `solve_rgbcct()`.
+- `solve_rgbcct()` in `src/fl/gfx/rgbw_colorimetric.cpp.hpp` solves the target
+  against the warm-W path and the cool-W path separately, then line-blends the
+  resulting RGBW tuples.
+- That shape is technically a layered / inner-channel overdrive family: it
+  composes solved warm and cool paths rather than selecting one direct strict
+  RGBCCT simplex.
+- The boosted RGBWW path is also layered/overdrive because it biases eta toward
+  equal warm/cool participation for more W contribution.
+
+Strict RGBCCT sub-gamut target:
+
+Use the RGB outer hull plus warm-W and cool-W inner emitters as a direct topology
+candidate set. For a typical `RGB + WW + CW` package, strict candidates include:
+
+- Singles: `R`, `G`, `B`, `WW`, `CW`.
+- Duals: `RG`, `RB`, `GB`, `R+WW`, `G+WW`, `B+WW`, `R+CW`, `G+CW`, `B+CW`,
+  `WW+CW`.
+- Direct 3-channel strict candidates: `RG+WW`, `RB+WW`, `GB+WW`, `RG+CW`,
+  `RB+CW`, `GB+CW`, `R+WW+CW`, `G+WW+CW`, `B+WW+CW`.
+
+Ambiguous regions:
+
+- Some regions, especially the `RB` side in common warm/cool layouts, may have
+  overlapping valid direct solves such as `RB+WW` and `RB+CW`.
+- The strict solver needs an explicit branch policy for these overlaps, not an
+  unconstrained N-channel optimizer.
+- The default policy should favor performant, MCU-friendly decisions such as
+  precomputed containment order, power/Y efficiency, headroom, and deterministic
+  tie-breaks. More expensive policy diagnostics can live in tests or offline
+  verifier tooling, not the per-pixel hot path.
+
+Virtual inner-primary candidate:
+
+- A virtual inner-primary mode is a good implementation candidate for resolving
+  ambiguous warm/cool regions because it can cache virtual inner anchors at
+  profile/cache build time.
+- Runtime complexity can then match the RGBW strict solve shape: choose the
+  containing virtual triangle and solve a fixed 3-emitter system.
+- This mode is still technically inner-channel overdrive because it allows
+  generated/cached virtual anchors and can permit 4-channel physical output
+  after expansion.
+- Therefore it must not be the default strict RGBCCT policy. It should be named
+  as a separate constrained virtual-inner overdrive family.
+
+Proposed naming direction:
+
+- `strict_rgbcct_subgamut`: direct legal RGBCCT topology solve, one candidate at
+  a time.
+- `rgbcct_layered_overdrive`: current warm-path/cool-path solve plus eta blend.
+- `rgbcct_virtual_inner_overdrive`: cached virtual inner-anchor solve; lower
+  runtime cost than fully dynamic overdrive, but still not strict sub-gamut.
+
+Acceptance criteria:
+
+- Current RGBWW behavior is documented and surfaced as layered/overdrive rather
+  than strict RGBCCT.
+- A strict RGBCCT mode exists that selects one legal direct candidate per solve.
+- Ambiguous strict regions use deterministic branch policy with no per-pixel
+  unconstrained optimizer.
+- Virtual inner-primary mode, if implemented, is opt-in and not the default.
+- Verifier/correction metadata records `model_family`, `active_channel_family`,
+  and whether virtual anchors were used.
+
+Likely files:
+
+- `src/fl/gfx/rgbww.h`
+- `src/fl/gfx/rgbww.cpp.hpp`
+- `src/fl/gfx/rgbw_colorimetric.h`
+- `src/fl/gfx/rgbw_colorimetric.cpp.hpp`
+- Future shared response files from Phase 2.
+- `tests/fl/gfx/rgbww.cpp`
+- `tests/fl/gfx/rgbw_colorimetric.cpp`
+
 ## Phase 4: Find and Wire RGB Implementation Points
 
 Status: research started; no implementation point has been chosen yet.
@@ -354,5 +469,13 @@ starts, use the project wrapper scripts rather than direct toolchain commands.
   or corrected/scaled RGB after those settings? The RGBW path currently applies
   premixed scale through the conversion call, so matching user expectations here
   needs an explicit decision.
+- What is the public API shape for selecting endpoint luminance policy, and is
+  the policy per profile, per channel, or global?
+- Should strict RGBCCT and layered RGBWW overdrive share the existing
+  `RGBWW_MODE` enum, or should new names/API fields make strict vs overdrive
+  impossible to confuse?
+- For RGBCCT ambiguous regions, which strict branch policy should be the default:
+  power/Y efficiency, channel-resolution/headroom, deterministic containment
+  order, or profile-provided priority?
 - Which drivers are acceptable for the first supported RGB integration path, and
   which can remain documented as not yet wired?
