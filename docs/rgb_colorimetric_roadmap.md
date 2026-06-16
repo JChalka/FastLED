@@ -83,11 +83,61 @@ MCU-friendly transforms:
   grid size like the RGBW LUT path.
 - The compile-time-off path must not retain the heavy math in ordinary sketches.
 
-## Phase 1: RGBW Sub-Gamut Endpoint Scaling
+## Clarified Design Decisions
 
-Status: active. The current local/workspace RGBW solver shape has the first
-`scale_to_full_endpoint`-style behavior, but the roadmap now requires an
-explicit endpoint policy axis before treating this family as complete.
+- **Emitter profiles:** replace the RGBW-specific mental model with an arbitrary
+  channel-order profile. A future generalized `DiodeProfile` shape should be
+  defined by channel order, channel count, and per-channel xyY data, supporting
+  grayscale/single-emitter through RGB, RGBW, RGBWW/RGBCCT, and 5+ emitter
+  packages. Channel order determines channel count; channel count determines
+  which topology families are available.
+- **Compile gates:** keep RGB and RGBW/RGBWW colorimetric gates independent so
+  users can pay only for the paths they use. Add an umbrella gate such as
+  `FASTLED_COLORIMETRIC` so mixed RGB + RGBW/RGBWW sketches can enable all
+  colorimetric families explicitly.
+- **Pre-solve transfer/power shaping vs post-solve mutation:** colorimetric
+  solvers should consume source `CRGB` values after any explicitly selected
+  source-side transfer/gamma or power-scaling preparation. This mirrors display
+  pipelines that de-gamma, transform color space, re-encode through 1D LUTs, and
+  then apply a 3D LUT. In FastLED terms, the colorimetric solve is the 3D-LUT-like
+  physical mapping stage. Legacy color temperature/correction byte scaling should
+  not be silently applied as a pre-solve substitute for source preparation, and
+  no gamma, correction, temperature, or power scaling should mutate the solved
+  physical tuple after the colorimetric solve.
+- **Endpoint policy scope:** dual-edge unreachable-endpoint policy should be
+  selectable per profile and/or globally. Users should be able to choose whether
+  a profile clips, rolls off, or scales a locked dual-edge endpoint.
+- **3-channel headroom naming:** call the separate 3-channel/interior physical
+  headroom restoration path `headroom_fit_scale` or similar. Do not describe it
+  as clipped-channel policy.
+- **RGBCCT ambiguous regions:** strict RGBCCT overlap handling should prefer the
+  least-branching runtime policy that still behaves deterministically. Candidate
+  decisions should be precomputed or cached when they are lightweight enough, so
+  the per-pixel path avoids expensive policy scoring.
+- **RGB integration:** RGB colorimetric mode should be driver-independent. It
+  should act on the `CRGB` values before driver-specific encoding, then feed the
+  solved RGB values into whatever output path the chosen LED driver already
+  needs. The solved values should not be changed after colorimetric application.
+
+## Phase 1: RGBW Endpoint Scaling and Endpoint Policy
+
+Status: active. This phase has two separate endpoint concepts that must not be
+conflated: 3-channel physical-headroom scaling and 2-channel unreachable-edge
+policy selection.
+
+Concept split:
+
+- **3-channel / interior `headroom_fit_scale`:** the solved RGBW tuple still has
+  real physical headroom. Example: `h315_s015_v100` can legitimately raise W
+  from the split-energy result toward full source drive while uniformly scaling
+  the participating channels. This restores use of available device headroom;
+  it is not a clipping-policy decision.
+- **2-channel / dual-edge unreachable endpoint policy:** the requested target-Y
+  physically cannot be achieved by the locked dual edge without clipping. A
+  half-scale yellow-like solve can mathematically land at a clipped/full endpoint
+  such as `R≈65535, G≈32768`; from there the implementation must choose a mapping
+  policy: clip, roll off, or scale the full endpoint while preserving
+  chromaticity.
 
 Landed or observed work:
 
@@ -103,9 +153,13 @@ Remaining work:
 
 - Verify the local-fork/workspace implementation against the known motivating
   rows, especially the `h315_s015_v100` style case where W should scale toward
-  the source max rather than the extracted split energy.
-- Replace the boolean-only opt-out shape with an explicit endpoint luminance
-  policy that can select:
+  the source max rather than the extracted split energy. This is the
+  3-channel/interior physical-headroom case.
+- Keep 3-channel/interior `headroom_fit_scale` as its own strict-subgamut
+  endpoint restoration path. Do not route it through the dual-edge
+  clipping/rolloff/full endpoint policy selector.
+- Add an explicit dual-edge endpoint luminance policy for locked 2-channel solves
+  that can select:
   - `y_correct_clip`: preserve the requested target-Y solve until physical
     clipping, then report/accept the residual.
   - `rolloff_after_clip`: follow the clipped/Y-correct result near the limit,
@@ -114,24 +168,31 @@ Remaining work:
   - `scale_to_full_endpoint`: compatibility/current behavior; solve the
     chromaticity-preserving endpoint, then scale it by the source/value axis for
     smoother channel resolution.
-- Confirm topology is preserved after endpoint scaling for native singles,
-  native dual edges, and strict interior routes.
-- Apply the same endpoint-policy contract to direct dual-edge solves in RGBW,
-  RGBCCT, and future direct 5+ emitter topologies. For future packages with
-  yellow, violet, or other outer-hull emitters, the policy must distinguish a
-  true anchor solve such as `RGY` or `RBV` from a dual-edge fallback.
+- Confirm topology is preserved after both endpoint mechanisms for native
+  singles, native dual edges, and strict interior routes.
+- Apply the dual-edge endpoint-policy contract to direct locked 2-channel solves
+  in RGBW, RGBCCT, and future direct 5+ emitter topologies. For future packages
+  with yellow, violet, or other outer-hull emitters, the policy must distinguish
+  a true anchor solve such as `RGY` or `RBV` from a physically unreachable
+  two-channel fallback.
 - Record endpoint policy metadata in any verifier rows, LUT summaries, and
   pass/fail dictionary keys that compare model output against measurements.
 - Add or update focused regression coverage once code changes are allowed.
 
 Acceptance criteria:
 
-- Strict RGBW output follows the selected endpoint policy, and the compatibility
-  policy preserves the current source-max tracking behavior.
-- Endpoint scaling or rolloff never introduces inactive channels.
+- Strict RGBW 3-channel/interior outputs use `headroom_fit_scale` or equivalent
+  available-physical-headroom restoration without being governed by the
+  dual-edge clipping policy selector.
+- Locked dual-edge outputs follow the selected endpoint policy, and the
+  compatibility policy preserves the full-endpoint scaling behavior.
+- Neither headroom scaling nor dual-edge clipping/rolloff/full-endpoint mapping
+  introduces inactive channels.
 - Existing strict sub-gamut chromaticity/topology behavior remains intact under
-  all endpoint policies.
+  both endpoint mechanisms.
 - Direct dual-edge tests cover clipping, rolloff, and scaled endpoint behavior.
+- 3-channel/interior tests cover the `h315_s015_v100`-style physical-headroom
+  restoration case separately from dual-edge policy tests.
 - Verifier output is recorded in the PR or issue thread.
 
 Likely files:
@@ -165,7 +226,9 @@ Candidate reusable pieces to extract:
 - Matrix helpers: `invert3x3`, `matvec3`, `build_source_matrix`.
 - Geometry helpers: `barycentric_xy`, RGB triangle projection helpers.
 - Source RGB to absolute emitter-domain XYZ conversion.
-- Profile/cache data that applies to physical RGB emitters, independent of W.
+- Profile/cache data for arbitrary channel-order emitter profiles, starting from
+  physical RGB emitters and extending to grayscale, RGBW, RGBCCT, and future 5+
+  emitter sets.
 - Quantization helpers only if they are shared by RGB and RGBW public surfaces.
 
 Pieces that should stay RGBW-specific unless proven otherwise:
@@ -185,7 +248,8 @@ Design constraints:
 Acceptance criteria:
 
 - RGBW and RGBWW public behavior is unchanged after the split.
-- The shared layer can build an RGB emitter basis without mentioning W.
+- The shared layer can build an emitter basis from channel order + per-channel
+  xyY data without hardcoding W as a required concept.
 - No new heap allocation appears in the per-pixel hot path.
 - The split is mechanical enough that Phase 3 can reuse the helpers without
   dragging in RGBW white extraction.
@@ -246,12 +310,13 @@ Possible public/private API shape:
 - Internal solver first, public dispatch later:
   `colorimetric_detail::solve_rgb_only(...)` or a renamed shared namespace once
   Phase 2 lands.
-- Reuse `DiodeProfile`'s RGB/source fields initially, ignoring W, unless Phase 2
-  produces a smaller shared `RgbEmitterProfile` cleanly.
+- Use the generalized channel-order `DiodeProfile` direction from Phase 2. RGB
+  consumes the first/declared RGB emitter basis; it should not require a W field
+  or an RGBW-specific profile layout.
 - Add a separate RGB compile gate, likely `FASTLED_RGB_COLORIMETRIC`, so RGB-only
-  code can remain independent from the existing RGBW gate. A compatibility alias
-  to the RGBW gate can be considered, but it should be a deliberate size/API
-  decision.
+  code can remain independent from the existing RGBW/RGBWW gate. An umbrella
+  `FASTLED_COLORIMETRIC` gate can enable all colorimetric families for mixed
+  RGB + RGBW/RGBWW sketches.
 
 Acceptance criteria:
 
@@ -316,10 +381,11 @@ Ambiguous regions:
   overlapping valid direct solves such as `RB+WW` and `RB+CW`.
 - The strict solver needs an explicit branch policy for these overlaps, not an
   unconstrained N-channel optimizer.
-- The default policy should favor performant, MCU-friendly decisions such as
-  precomputed containment order, power/Y efficiency, headroom, and deterministic
-  tie-breaks. More expensive policy diagnostics can live in tests or offline
-  verifier tooling, not the per-pixel hot path.
+- The default policy should favor the least-branching MCU-friendly decision that
+  can be made from cached profile data: precomputed containment order, cached
+  overlap ownership, lightweight power/Y efficiency hints, headroom flags, and
+  deterministic tie-breaks. More expensive policy diagnostics can live in tests
+  or offline verifier tooling, not the per-pixel hot path.
 
 Virtual inner-primary candidate:
 
@@ -349,6 +415,8 @@ Acceptance criteria:
 - A strict RGBCCT mode exists that selects one legal direct candidate per solve.
 - Ambiguous strict regions use deterministic branch policy with no per-pixel
   unconstrained optimizer.
+- Ambiguous-region decisions are cached or precomputed when practical, keeping
+  runtime branch count comparable to the RGBW strict solve path.
 - Virtual inner-primary mode, if implemented, is opt-in and not the default.
 - Verifier/correction metadata records `model_family`, `active_channel_family`,
   and whether virtual anchors were used.
@@ -379,6 +447,11 @@ Known RGB pipeline facts:
   `loadAndScaleRGB` through `PixelIterator`.
 - Because a colorimetric RGB solve needs all three source channels at once,
   inserting it only into one scalar `loadAndScale*()` method is unsafe.
+- The colorimetric solve should happen after any explicit source-side
+  transfer/gamma or power-shaping stage, but before driver-specific byte
+  ordering or chipset encoding. Once the physical RGB tuple is solved, the
+  driver should serialize that tuple without applying legacy color temperature,
+  correction, gamma, or power transforms that would skew it.
 
 Candidate integration paths:
 
@@ -413,12 +486,19 @@ Phase 4 decision criteria:
 
 - The chosen path must preserve existing output timing for non-opt-in sketches.
 - The opt-in path must not require every chipset driver to be edited at once.
-- The transform must run after correction, temperature, brightness, and dither
-  semantics are clearly defined. If it runs before any of those, document why.
+- The transform must run after any explicit source-side transfer/gamma or
+  power-shaping stage and before driver serialization. Legacy correction,
+  temperature, brightness, and dither semantics must be clearly defined for
+  colorimetric mode rather than inherited accidentally from byte scaling.
+- Current direction: feed source-prepared `CRGB` into the colorimetric path. Do
+  not apply legacy color temperature/correction as hidden pre-solve scaling, and
+  do not apply gamma/correction/temperature/power transforms after the solve.
 - It must be clear whether RGB colorimetric applies per controller, per channel,
   globally, or some combination of those.
 - The final API must remain compatible with current `setCorrection`,
   `setTemperature`, `setRgbw`, and `setRgbww` behavior.
+- The integration should be driver-independent: solve the `CRGB` values once,
+  then hand solved RGB bytes/fractions to the normal driver-specific output path.
 
 Likely files to inspect or modify during Phase 4:
 
@@ -436,6 +516,9 @@ Acceptance criteria:
 
 - Existing plain RGB output is byte-for-byte unchanged when the feature is off.
 - Opt-in RGB colorimetric output is reachable through the chosen public API.
+- Colorimetric RGB output bypasses legacy color temperature/correction/gamma or
+  power mutation after the solve; any gamma/transfer or power shaping is explicit
+  and pre-solve.
 - At least one host/stub capture path proves the transform reaches encoded RGB
   bytes, not just standalone solver output.
 - The remaining direct-driver coverage gap, if any, is documented before merge.
@@ -457,25 +540,16 @@ starts, use the project wrapper scripts rather than direct toolchain commands.
   topology, monotonicity, and dispatch; they cannot prove real-world capture
   accuracy.
 
-## Open Questions
+## Remaining Open Questions
 
-- Should RGB-only colorimetric reuse `DiodeProfile` and ignore W, or should Phase
-  2 introduce a smaller shared RGB emitter/profile type?
-- Should `FASTLED_RGB_COLORIMETRIC` be independent from
-  `FASTLED_RGBW_COLORIMETRIC`, or should one imply the other for users who want
-  all colorimetric math enabled?
-- Should runtime opt-in be per channel, global, or both?
-- Should the transform consume raw CRGB before existing correction/temperature,
-  or corrected/scaled RGB after those settings? The RGBW path currently applies
-  premixed scale through the conversion call, so matching user expectations here
-  needs an explicit decision.
-- What is the public API shape for selecting endpoint luminance policy, and is
-  the policy per profile, per channel, or global?
+- Should runtime opt-in be per channel, global, or both for each colorimetric
+  family? Current direction supports per-profile and/or global endpoint policy,
+  but controller/channel enablement still needs an API shape.
 - Should strict RGBCCT and layered RGBWW overdrive share the existing
   `RGBWW_MODE` enum, or should new names/API fields make strict vs overdrive
   impossible to confuse?
-- For RGBCCT ambiguous regions, which strict branch policy should be the default:
-  power/Y efficiency, channel-resolution/headroom, deterministic containment
-  order, or profile-provided priority?
-- Which drivers are acceptable for the first supported RGB integration path, and
-  which can remain documented as not yet wired?
+- What is the exact lightweight cached policy representation for ambiguous
+  RGBCCT regions: precomputed triangle priority, compact region table, cached
+  branch order, or profile-provided priority?
+- Which driver-independent insertion point can transform raw `CRGB` once while
+  still reaching every relevant driver path without post-solve mutation?
