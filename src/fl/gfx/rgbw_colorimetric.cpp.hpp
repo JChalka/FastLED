@@ -333,18 +333,23 @@ static void apply_dual_edge_y_correct_clip(const float full[4],
     }
     constexpr float kEps = 1e-9f;
     float min_full = full[active[0]];
+    float max_full = full[active[0]];
     for (int i = 1; i < n; ++i) {
         min_full = fl::min(min_full, full[active[i]]);
+        max_full = fl::max(max_full, full[active[i]]);
     }
-    if (min_full <= kEps) {
+    if (min_full <= kEps || max_full <= kEps) {
         return;
     }
-    const float scale = source_min / min_full;
+    const float desired_scale = source_min / min_full;
+    const float max_legal_scale = 1.0f / max_full;
+    const float scale = fl::min(desired_scale, max_legal_scale);
     for (int i = 0; i < n; ++i) {
         const int idx = active[i];
+        const float uncapped_v = fl::max(full[idx] * desired_scale, 0.0f);
         const float v = fl::max(full[idx] * scale, 0.0f);
         if (uncapped_out != nullptr) {
-            uncapped_out[idx] = v;
+            uncapped_out[idx] = uncapped_v;
         }
         out[idx] = fl::min(v, 1.0f);
     }

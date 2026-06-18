@@ -10,6 +10,11 @@
   `y_correct_clip`, with rolloff and full-endpoint scaling as explicit policies.
   RW/GW/BW-style inner boundaries are narrow cached dual-edge lines, not
   3-channel solves.
+- Dual-edge `y_correct_clip` must preserve the solved chromaticity ratio by
+  capping the uniform scale when any active diode reaches physical max. Do not
+  clip channels independently or keep increasing the weaker/stronger partner;
+  that turns full yellow-like edges into physically incorrect equal-channel
+  endpoints.
 - Colorimetric ordering: transfer/gamma curves and power shaping may be valid
   source-side, pre-solve preparation. The forbidden operation is mutating the
   solved physical tuple after the colorimetric solve, or silently using legacy

@@ -155,7 +155,9 @@ Landed or observed work:
   a compatibility alias.
 - Locked native dual edges now route through `RgbwColorimetricDualEdgePolicy`,
   defaulting to `YCorrectClip` with explicit `RolloffAfterClip` and
-  `ScaleToFullEndpoint` modes.
+  `ScaleToFullEndpoint` modes. `YCorrectClip` preserves the solved channel ratio
+  by capping the uniform scale once any participating channel reaches physical
+  max; it must never increase one channel independently after another clips.
 - Interior `RW`, `GW`, and `BW` boundary lines are checked with a narrow line
   tolerance before sub-gamut triangle routing.
 - The public/global policy selector is exposed through

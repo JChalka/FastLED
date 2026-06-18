@@ -1508,4 +1508,3 @@ FL_TEST_CASE("issue #2748: count_active_channels classification") {
     // Below LSB-eps — counted as inactive.
     FL_CHECK(count_active_channels(1.0e-6f, 1.0f, 1.0f) == 2);
 }
-
