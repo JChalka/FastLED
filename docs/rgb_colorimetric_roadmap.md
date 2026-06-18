@@ -158,6 +158,11 @@ Landed or observed work:
   `ScaleToFullEndpoint` modes. `YCorrectClip` preserves the solved channel ratio
   by capping the uniform scale once any participating channel reaches physical
   max; it must never increase one channel independently after another clips.
+- Live verifier follow-up: `YCorrectClip` now uses source-aligned demand scaling
+  (`max(source_i / full_i)`) instead of `min(input) / min(full)`. Chartreuse is
+  the motivating case: a dual-channel solve can still reach full green while
+  increasing red chromatically, so the policy must keep raising the uniform
+  solved ratio until the true limiting diode reaches physical max.
 - Interior `RW`, `GW`, and `BW` boundary lines are checked with a narrow line
   tolerance before sub-gamut triangle routing.
 - The public/global policy selector is exposed through
@@ -174,6 +179,10 @@ Remaining work:
   3-channel/interior physical-headroom case.
 - Confirm topology is preserved after both endpoint mechanisms for native
   singles, native dual edges, and strict interior routes.
+- Re-run verifier for dual-edge headroom cases like chartreuse, azure, violet,
+  yellow_full, and yellow_half to confirm `YCorrectClip` now continues
+  increasing a chromatically correct dual-edge tuple while physical headroom
+  remains, then plateaus only at the true limiting diode.
 - Record endpoint policy metadata in any verifier rows, LUT summaries, and
   pass/fail dictionary keys that compare model output against measurements.
 - Add direct solver regression coverage once the test harness can exercise the

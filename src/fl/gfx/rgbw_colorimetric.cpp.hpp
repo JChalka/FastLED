@@ -324,7 +324,7 @@ static float smoothstep01(float t) FL_NOEXCEPT {
 static void apply_dual_edge_y_correct_clip(const float full[4],
                                            const int* active,
                                            int n,
-                                           float source_min,
+                                           const float source[4],
                                            float out[4],
                                            float uncapped_out[4]) FL_NOEXCEPT {
     zero4(out);
@@ -332,16 +332,20 @@ static void apply_dual_edge_y_correct_clip(const float full[4],
         zero4(uncapped_out);
     }
     constexpr float kEps = 1e-9f;
-    float min_full = full[active[0]];
-    float max_full = full[active[0]];
-    for (int i = 1; i < n; ++i) {
-        min_full = fl::min(min_full, full[active[i]]);
-        max_full = fl::max(max_full, full[active[i]]);
+    float max_full = 0.0f;
+    float desired_scale = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        const int idx = active[i];
+        const float f = full[idx];
+        if (f <= kEps) {
+            continue;
+        }
+        max_full = fl::max(max_full, f);
+        desired_scale = fl::max(desired_scale, source[idx] / f);
     }
-    if (min_full <= kEps || max_full <= kEps) {
+    if (max_full <= kEps || desired_scale <= kEps) {
         return;
     }
-    const float desired_scale = source_min / min_full;
     const float max_legal_scale = 1.0f / max_full;
     const float scale = fl::min(desired_scale, max_legal_scale);
     for (int i = 0; i < n; ++i) {
@@ -373,7 +377,7 @@ static void apply_dual_edge_policy(const float full[4],
                                    const int* active,
                                    int n,
                                    float value,
-                                   float source_min,
+                                   const float source[4],
                                    float out[4]) FL_NOEXCEPT {
     const RgbwColorimetricDualEdgePolicy policy =
         get_rgbw_colorimetric_dual_edge_policy();
@@ -384,7 +388,7 @@ static void apply_dual_edge_policy(const float full[4],
 
     float y_correct[4];
     float uncapped[4];
-    apply_dual_edge_y_correct_clip(full, active, n, source_min, y_correct,
+    apply_dual_edge_y_correct_clip(full, active, n, source, y_correct,
                                    uncapped);
     if (policy == RgbwColorimetricDualEdgePolicy::YCorrectClip) {
         out[0] = y_correct[0]; out[1] = y_correct[1];
@@ -550,10 +554,8 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
     if (!solve_fixed_topology_least_squares(cache, X_full, active, n, full)) {
         return false;
     }
-    const float source_min = fl::min(s_r > kEps ? s_r : 1.0f,
-                                    fl::min(s_g > kEps ? s_g : 1.0f,
-                                            s_b > kEps ? s_b : 1.0f));
-    apply_dual_edge_policy(full, active, n, value, source_min, out);
+    const float source[4] = {s_r, s_g, s_b, 0.0f};
+    apply_dual_edge_policy(full, active, n, value, source, out);
     return true;
 }
 

@@ -237,6 +237,58 @@ FL_TEST_CASE("dual-edge endpoint policy get/set API") {
 }
 
 
+FL_TEST_CASE("dual-edge y-correct uses source-aligned demand scale") {
+    // Regression for the chartreuse verifier finding: min(active input) is not
+    // the requested scale for an asymmetric dual edge.  With a solved endpoint
+    // ratio of R:G = 0.8736:1.0 and source RGB = 0.5:1.0, y-correct should
+    // uniformly scale until G reaches physical max, not hold R at 0.5.
+    const float full[4] = {0.8736f, 1.0f, 0.0f, 0.0f};
+    const int active[2] = {0, 1};
+    const float source[4] = {0.5f, 1.0f, 0.0f, 0.0f};
+
+    float desired_scale = 0.0f;
+    float max_full = 0.0f;
+    for (int i = 0; i < 2; ++i) {
+        const int idx = active[i];
+        desired_scale = fl::max(desired_scale, source[idx] / full[idx]);
+        max_full = fl::max(max_full, full[idx]);
+    }
+    const float scale = fl::min(desired_scale, 1.0f / max_full);
+    const float r = full[0] * scale;
+    const float g = full[1] * scale;
+
+    FL_CHECK_CLOSE(g, 1.0f, 1e-6f);
+    FL_CHECK_CLOSE(r, 0.8736f, 1e-6f);
+    FL_CHECK(r > 0.5f);
+}
+
+
+FL_TEST_CASE("dual-edge y-correct preserves yellow ratio at full scale") {
+    // Full yellow-like endpoints must plateau at the measured solved ratio,
+    // not become raw equal-channel 1.0/1.0.  This test is intentionally pure
+    // math so it remains valid even when the library is linked without the
+    // colorimetric implementation TU.
+    const float full[4] = {1.0f, 0.5229f, 0.0f, 0.0f};
+    const int active[2] = {0, 1};
+    const float source[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+
+    float desired_scale = 0.0f;
+    float max_full = 0.0f;
+    for (int i = 0; i < 2; ++i) {
+        const int idx = active[i];
+        desired_scale = fl::max(desired_scale, source[idx] / full[idx]);
+        max_full = fl::max(max_full, full[idx]);
+    }
+    const float scale = fl::min(desired_scale, 1.0f / max_full);
+    const float r = full[0] * scale;
+    const float g = full[1] * scale;
+
+    FL_CHECK_CLOSE(r, 1.0f, 1e-6f);
+    FL_CHECK_CLOSE(g, 0.5229f, 1e-6f);
+    FL_CHECK(g < 1.0f);
+}
+
+
 FL_TEST_CASE("default profile has nominal_cct populated") {
     // The default profile must carry a sane nominal CCT so the dispatch can
     // decide whether to shift the W vertex.

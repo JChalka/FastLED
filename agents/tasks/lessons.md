@@ -15,6 +15,11 @@
   clip channels independently or keep increasing the weaker/stronger partner;
   that turns full yellow-like edges into physically incorrect equal-channel
   endpoints.
+- Some dual-edge inputs still have real physical headroom even when one source
+  channel is lower. Chartreuse-style cases should use source-aligned demand
+  scaling (`max(source_i / full_i)`), not min(input); the solver should keep
+  raising the chromatically correct dual-edge tuple until the true limiting
+  diode reaches max, then plateau.
 - Colorimetric ordering: transfer/gamma curves and power shaping may be valid
   source-side, pre-solve preparation. The forbidden operation is mutating the
   solved physical tuple after the colorimetric solve, or silently using legacy
