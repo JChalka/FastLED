@@ -1616,8 +1616,8 @@ public:
 	/// @} Power Model Configuration
 
 	/// @name RGBW Colorimetric Configuration
-	/// God-instance wrappers around `fl::set_rgbw_colorimetric_profile` /
-	/// `fl::get_rgbw_colorimetric_profile`. See
+	/// God-instance wrappers around the RGBW colorimetric profile and dual-edge
+	/// endpoint-policy accessors. See
 	/// `agents/docs/cpp-standards.md` → "Public Settings Pattern" for the
 	/// rule that global setters live here, not as bare `fl::` free functions.
 	/// @{
@@ -1637,6 +1637,19 @@ public:
 	/// Currently active RGBW colorimetric profile (defaults to `&fl::kRgbwDefaultProfile`).
 	inline const fl::DiodeProfile* getRgbwColorimetricProfile() const FL_NOEXCEPT {
 		return fl::get_rgbw_colorimetric_profile();
+	}
+
+	/// Select how locked dual-edge RGBW colorimetric solves handle unreachable
+	/// endpoint luminance. Defaults to `YCorrectClip`. This policy is separate
+	/// from strict/interior headroom fitting.
+	inline void setRgbwColorimetricDualEdgePolicy(
+		fl::RgbwColorimetricDualEdgePolicy policy) FL_NOEXCEPT {
+		fl::set_rgbw_colorimetric_dual_edge_policy(policy);
+	}
+
+	/// Current global RGBW colorimetric dual-edge endpoint policy.
+	inline fl::RgbwColorimetricDualEdgePolicy getRgbwColorimetricDualEdgePolicy() const FL_NOEXCEPT {
+		return fl::get_rgbw_colorimetric_dual_edge_policy();
 	}
 
 	/// @} RGBW Colorimetric Configuration

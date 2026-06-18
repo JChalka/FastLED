@@ -11,24 +11,24 @@
 #include "fl/math/math.h"
 #include "fl/stl/unique_ptr.h"
 
-// Strict sub-gamut input-max preservation policy.
+// Strict sub-gamut headroom-fit policy.
 //
-// Default ON: after the strict colorimetric solve, the final RGBW tuple is
-// uniformly scaled so max(output) tracks max(input).  This is intentionally
-// continuous, not a special case for exactly-full-scale input: a source value of
-// 65534 should not fall back to the unscaled endpoint while 65535 gets boosted.
-// Uniform scaling preserves solved chromaticity and legal topology because all
-// active output channels are multiplied by the same factor.  It does change the
-// absolute-Y endpoint from the pure colorimetric solve, so users who prefer exact
-// Y-preserving behavior can opt out.
+// Default ON: after strict 3-channel/interior solves, the final RGBW tuple is
+// uniformly scaled to use real physical headroom that would otherwise be lost.
+// This is intentionally separate from locked dual-edge endpoint policy: dual
+// edges can request unreachable target-Y values and default to Y-correct clip,
+// while interior sub-gamut solves still have participating-channel headroom.
 //
 // Opt out with:
-//   -DFASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0
+//   -DFASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE=0
 //
-// This is intentionally strict/sub-gamut only.  wx_lp_legacy and overdrive have
-// their own endpoint policies.
-#ifndef FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX
-#define FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX 1
+// Back-compat: the old macro name maps to the new headroom-fit name.
+#ifndef FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE
+#ifdef FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX
+#define FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX
+#else
+#define FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE 1
+#endif
 #endif
 
 namespace fl {
@@ -51,9 +51,9 @@ namespace colorimetric_detail {
 //     Reference strict RGBW solve. Native singles are exact identity; native
 //     dual edges are fixed-topology measured two-emitter solves; interiors
 //     solve a full-chroma endpoint in RGW/RBW/BGW and then apply value.  By
-//     default, the final tuple receives a continuous uniform input-max
-//     preservation scale so max(output) tracks max(input), avoiding a steep
-//     65534/65535 discontinuity at the top end.
+//     default, strict interiors receive a continuous uniform headroom-fit scale
+//     so max(output) tracks max(input), while locked dual edges use the selected
+//     RgbwColorimetricDualEdgePolicy.
 //
 //   solve_wx_lp_legacy()
 //     Reference white-extraction solve. It maximizes W while preserving target
@@ -286,7 +286,7 @@ static void normalize4_if_needed(float out[4]) FL_NOEXCEPT {
     }
 }
 
-// Strict-mode input-max endpoint preservation.
+// Strict-mode 3-channel/interior headroom fitting.
 //
 // The colorimetric strict solve may split source energy across W / sub-gamut
 // channels such that the largest output channel is below the source value, e.g.
@@ -294,14 +294,11 @@ static void normalize4_if_needed(float out[4]) FL_NOEXCEPT {
 // valid absolute-Y interpretation, but it is surprising for source-drive
 // semantics because a near-max source can produce no near-max output channel.
 //
-// When enabled, apply a uniform post-solve scale whenever max(output) is below
-// max(input), not only when max(input) is exactly 1.0.  This avoids a steep
-// discontinuity between 65534 and 65535 while preserving xy and topology because
-// every active output channel is multiplied by the same factor.  The policy is
-// opt-out for users who prefer the exact Y-preserving endpoint.
-static void preserve_input_max_endpoint(float source_max,
-                                        float out[4]) FL_NOEXCEPT {
-#if FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX
+// This is not the dual-edge clipping policy. It only uses real available
+// physical headroom in strict 3-channel/interior solves.
+static void apply_headroom_fit_scale(float source_max,
+                                     float out[4]) FL_NOEXCEPT {
+#if FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE
     constexpr float kInputEps = 0.5f / 65535.0f;
     constexpr float kOutputEps = 1e-9f;
     const float target_max = fl::clamp(source_max, 0.0f, 1.0f);
@@ -317,6 +314,92 @@ static void preserve_input_max_endpoint(float source_max,
     (void)source_max;
     (void)out;
 #endif
+}
+
+static float smoothstep01(float t) FL_NOEXCEPT {
+    t = fl::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static void apply_dual_edge_y_correct_clip(const float full[4],
+                                           const int* active,
+                                           int n,
+                                           float source_min,
+                                           float out[4],
+                                           float uncapped_out[4]) FL_NOEXCEPT {
+    zero4(out);
+    if (uncapped_out != nullptr) {
+        zero4(uncapped_out);
+    }
+    constexpr float kEps = 1e-9f;
+    float min_full = full[active[0]];
+    for (int i = 1; i < n; ++i) {
+        min_full = fl::min(min_full, full[active[i]]);
+    }
+    if (min_full <= kEps) {
+        return;
+    }
+    const float scale = source_min / min_full;
+    for (int i = 0; i < n; ++i) {
+        const int idx = active[i];
+        const float v = fl::max(full[idx] * scale, 0.0f);
+        if (uncapped_out != nullptr) {
+            uncapped_out[idx] = v;
+        }
+        out[idx] = fl::min(v, 1.0f);
+    }
+}
+
+static void apply_dual_edge_scaled_endpoint(const float full[4],
+                                            const int* active,
+                                            int n,
+                                            float value,
+                                            float out[4]) FL_NOEXCEPT {
+    float endpoint[4] = { full[0], full[1], full[2], full[3] };
+    normalize4_if_needed(endpoint);
+    zero4(out);
+    for (int i = 0; i < n; ++i) {
+        const int idx = active[i];
+        out[idx] = fl::clamp(endpoint[idx] * value, 0.0f, 1.0f);
+    }
+}
+
+static void apply_dual_edge_policy(const float full[4],
+                                   const int* active,
+                                   int n,
+                                   float value,
+                                   float source_min,
+                                   float out[4]) FL_NOEXCEPT {
+    const RgbwColorimetricDualEdgePolicy policy =
+        get_rgbw_colorimetric_dual_edge_policy();
+    if (policy == RgbwColorimetricDualEdgePolicy::ScaleToFullEndpoint) {
+        apply_dual_edge_scaled_endpoint(full, active, n, value, out);
+        return;
+    }
+
+    float y_correct[4];
+    float uncapped[4];
+    apply_dual_edge_y_correct_clip(full, active, n, source_min, y_correct,
+                                   uncapped);
+    if (policy == RgbwColorimetricDualEdgePolicy::YCorrectClip) {
+        out[0] = y_correct[0]; out[1] = y_correct[1];
+        out[2] = y_correct[2]; out[3] = y_correct[3];
+        return;
+    }
+
+    float endpoint[4];
+    apply_dual_edge_scaled_endpoint(full, active, n, value, endpoint);
+    float max_uncapped = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        max_uncapped = fl::max(max_uncapped, uncapped[active[i]]);
+    }
+    const float alpha = smoothstep01((max_uncapped - 1.0f) * 4.0f);
+    zero4(out);
+    for (int i = 0; i < n; ++i) {
+        const int idx = active[i];
+        const float v = y_correct[idx] * (1.0f - alpha) + endpoint[idx] * alpha;
+        out[idx] = fl::clamp(v, 0.0f, 1.0f);
+    }
 }
 
 static const float* column_for_idx(const ProfileCache& cache, int idx) FL_NOEXCEPT {
@@ -424,9 +507,9 @@ static bool solve_fixed_topology_least_squares(const ProfileCache& cache,
 // Native dual-edge authority.  A native RG/RB/GB input must not introduce W or
 // the inactive RGB primary, but it also must not be raw passthrough.  The
 // target is first reduced to full-chroma edge coordinates, solved using only
-// the active measured emitters, normalized at the endpoint, and finally scaled
-// by the original source value.  This is the path that fixes yellow_half /
-// cyan_half / magenta_half without reintroducing illegal topology.
+// the active measured emitters, then mapped through the configured dual-edge
+// endpoint policy.  This is the path that fixes yellow_half / cyan_half /
+// magenta_half without reintroducing illegal topology.
 static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
                                                   float s_r, float s_g,
                                                   float s_b,
@@ -440,8 +523,8 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
 
     // Native dual authority means edge-lock the active channel set, not raw
     // input passthrough. Solve the full-chroma edge target against the active
-    // two measured emitter columns, normalize at the endpoint, then apply the
-    // original value scale so yellow_half/cyan_half/etc remain granular.
+    // two measured emitter columns, then let the dual-edge policy choose how an
+    // unreachable endpoint maps back to the source value range.
     const float c_r = s_r / value;
     const float c_g = s_g / value;
     const float c_b = s_b / value;
@@ -462,15 +545,53 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
     if (!solve_fixed_topology_least_squares(cache, X_full, active, n, full)) {
         return false;
     }
-    normalize4_if_needed(full);
-
-    out[0] = full[0] * value;
-    out[1] = full[1] * value;
-    out[2] = full[2] * value;
-    out[3] = 0.0f;
-    normalize4_if_needed(out);
-    preserve_input_max_endpoint(value, out);
+    const float source_min = fl::min(s_r > kEps ? s_r : 1.0f,
+                                    fl::min(s_g > kEps ? s_g : 1.0f,
+                                            s_b > kEps ? s_b : 1.0f));
+    apply_dual_edge_policy(full, active, n, value, source_min, out);
     return true;
+}
+
+static bool point_on_segment_xy(const float p[2], const float a[2],
+                                const float b[2]) FL_NOEXCEPT {
+    constexpr float kLineEps = 2.0e-6f;
+    const float abx = b[0] - a[0];
+    const float aby = b[1] - a[1];
+    const float apx = p[0] - a[0];
+    const float apy = p[1] - a[1];
+    const float ab_len2 = abx * abx + aby * aby;
+    if (ab_len2 <= 1e-20f) {
+        return false;
+    }
+    const float t = (apx * abx + apy * aby) / ab_len2;
+    if (t < -kLineEps || t > 1.0f + kLineEps) {
+        return false;
+    }
+    const float cross = apx * aby - apy * abx;
+    return (cross * cross) <= (kLineEps * kLineEps * ab_len2);
+}
+
+static bool solve_inner_boundary_line(const ProfileCache& cache,
+                                      const float xy_t[2],
+                                      const float X_t[3],
+                                      float out_rgbw[4]) FL_NOEXCEPT {
+    const float* xy[3] = {
+        cache.profile->xy_r, cache.profile->xy_g, cache.profile->xy_b,
+    };
+    const int outer_idx[3] = {0, 1, 2};
+    for (int i = 0; i < 3; ++i) {
+        if (!point_on_segment_xy(xy_t, xy[i], cache.xy_w)) {
+            continue;
+        }
+        const int active[2] = {outer_idx[i], 3};
+        if (!solve_fixed_topology_least_squares(cache, X_t, active, 2,
+                                                out_rgbw)) {
+            return false;
+        }
+        normalize4_if_needed(out_rgbw);
+        return true;
+    }
+    return false;
 }
 
 // Strict full-chroma endpoint solve from an absolute XYZ target.
@@ -481,8 +602,12 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
 // in the public solve_strict_subgamut() wrapper after this endpoint is found.
 static bool solve_strict_subgamut_from_XYZ(const ProfileCache& cache,
                                            float X_t[3],
-                                           float out_rgbw[4]) FL_NOEXCEPT {
+                                           float out_rgbw[4],
+                                           bool* used_dual_boundary = nullptr) FL_NOEXCEPT {
     zero4(out_rgbw);
+    if (used_dual_boundary != nullptr) {
+        *used_dual_boundary = false;
+    }
     const float sum_xyz = X_t[0] + X_t[1] + X_t[2];
     if (sum_xyz < 1e-9f) {
         return true;
@@ -493,6 +618,13 @@ static bool solve_strict_subgamut_from_XYZ(const ProfileCache& cache,
     // value-scaled nodes from repeatedly normalizing to the same saturated
     // tuple and mirrors the reference model's endpoint-first structure.
     project_to_hull(cache, X_t, xy_t);
+
+    if (solve_inner_boundary_line(cache, xy_t, X_t, out_rgbw)) {
+        if (used_dual_boundary != nullptr) {
+            *used_dual_boundary = true;
+        }
+        return true;
+    }
 
     struct SubGamut {
         const float* xy_a;
@@ -575,7 +707,9 @@ bool solve_strict_subgamut(const ProfileCache& cache, float s_r,
     source_rgb_to_XYZ(cache, c_r, c_g, c_b, X_full);
 
     float full[4];
-    if (!solve_strict_subgamut_from_XYZ(cache, X_full, full)) {
+    bool used_dual_boundary = false;
+    if (!solve_strict_subgamut_from_XYZ(cache, X_full, full,
+                                        &used_dual_boundary)) {
         return false;
     }
 
@@ -584,7 +718,9 @@ bool solve_strict_subgamut(const ProfileCache& cache, float s_r,
     out_rgbw[2] = full[2] * value;
     out_rgbw[3] = full[3] * value;
     normalize4_if_needed(out_rgbw);
-    preserve_input_max_endpoint(value, out_rgbw);
+    if (!used_dual_boundary) {
+        apply_headroom_fit_scale(value, out_rgbw);
+    }
     return true;
 }
 

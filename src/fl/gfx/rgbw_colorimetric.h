@@ -17,15 +17,16 @@
 ///   * wx_lp_legacy solves a chromaticity-preserving maximum-W endpoint.
 ///   * boosted/overdrive intentionally trades chromaticity for more W/luminance.
 ///
-/// Strict-mode input-max policy:
-///   By default, strict sub-gamut mode preserves source-drive headroom: after
-///   the colorimetric solve, max(output RGBW) is uniformly scaled up to track
-///   max(input RGB) when the solve would otherwise fall below it.  This is
-///   continuous across the whole range, not only at exactly 65535, so 65534
-///   does not suddenly drop to an unscaled endpoint while 65535 gets boosted.
-///   Uniform scaling preserves solved chromaticity/topology.  Define
-///   FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0 to opt out and keep
-///   the exact colorimetric/Y-preserving endpoint.
+/// Strict-mode headroom-fit policy:
+///   By default, strict 3-channel/interior sub-gamut output uses real physical
+///   headroom that would otherwise be lost: after the colorimetric solve,
+///   max(output RGBW) is uniformly scaled up to track max(input RGB) when the
+///   solve would otherwise fall below it.  This is continuous across the whole
+///   range, not only at exactly 65535.  Uniform scaling preserves solved
+///   chromaticity/topology.  Define
+///   FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE=0 to opt out.  The legacy
+///   FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX macro is still honored
+///   as a compatibility alias.
 ///
 /// Native-gamut invariants:
 ///   * Single-channel R/G/B inputs are exact identity.
@@ -396,11 +397,10 @@ inline void build_profile_cache(const DiodeProfile* p,
 //      not raw passthrough.
 //   4. Interior inputs split source value from chroma, solve the full-chroma
 //      endpoint in one of {RGW, RBW, BGW}, then scale by source value.
-//   5. Unless FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX=0, the final
-//      tuple gets a continuous uniform input-max scale so max(output) tracks
-//      max(input).  This avoids top-end discontinuities like 65534 staying
-//      unscaled while 65535 jumps to a full-scale output, while preserving
-//      xy/topology.
+//   5. Unless FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE=0, the final
+//      3-channel/interior tuple gets a continuous uniform headroom-fit scale so
+//      max(output) tracks max(input), while preserving xy/topology. Locked
+//      dual-edge solves use RgbwColorimetricDualEdgePolicy instead.
 //
 // Returns false only for numerically degenerate profiles / matrices where the
 // caller should fall back to a simpler path.

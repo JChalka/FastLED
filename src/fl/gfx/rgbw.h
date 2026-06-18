@@ -82,6 +82,16 @@ enum class InputGamut : u8 {
     DciP3D60,      // DCI-P3 D60 — ACES / cinema mastering variant
 };
 
+// Endpoint policy for locked 2-channel colorimetric solves. This is separate
+// from strict/interior headroom fitting: dual edges can request target Y values
+// the two physical emitters cannot produce without clipping, so the profile or
+// global policy must choose how to map that unreachable endpoint.
+enum class RgbwColorimetricDualEdgePolicy : u8 {
+    YCorrectClip = 0,       // Default: track Y until a channel physically clips.
+    RolloffAfterClip = 1,   // Smoothly compress after the Y-correct clip point.
+    ScaleToFullEndpoint = 2 // Explicit opt-in: scale normalized full endpoint.
+};
+
 // Reconfigure `profile`'s input_xy_r/g/b/w to one of the named gamuts.
 // For `InputGamut::Native`, copies the profile's own xy_r/g/b into
 // input_xy_r/g/b and sets input_xy_w to D65. For named gamuts, uses the
@@ -112,6 +122,13 @@ void set_rgbw_colorimetric_profile(const DiodeProfile* profile) FL_NOEXCEPT;
 
 // Currently active profile (defaults to &kRgbwDefaultProfile).
 const DiodeProfile* get_rgbw_colorimetric_profile() FL_NOEXCEPT;
+
+// Set/get the global dual-edge endpoint policy used by colorimetric native
+// outer-edge solves. Available whether or not the colorimetric implementation
+// is compiled in so user code can configure it unconditionally.
+void set_rgbw_colorimetric_dual_edge_policy(
+    RgbwColorimetricDualEdgePolicy policy) FL_NOEXCEPT;
+RgbwColorimetricDualEdgePolicy get_rgbw_colorimetric_dual_edge_policy() FL_NOEXCEPT;
 
 // Interpolation scheme used by the colorimetric LUT (#2720). Bilinear stores
 // 4 channel values per grid cell (8 B/cell at i16 quantization) — cheapest in

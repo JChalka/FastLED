@@ -193,6 +193,8 @@ void rgb_2_rgbw_user_function(u16 w_color_temperature, u8 r,
 namespace {
 struct RgbwColorimetricState {
     const DiodeProfile* profile = nullptr;
+    RgbwColorimetricDualEdgePolicy dual_edge_policy =
+        RgbwColorimetricDualEdgePolicy::YCorrectClip;
 };
 } // namespace
 
@@ -204,6 +206,15 @@ const DiodeProfile* get_rgbw_colorimetric_profile() FL_NOEXCEPT {
     const DiodeProfile* p =
         fl::Singleton<RgbwColorimetricState>::instance().profile;
     return p != nullptr ? p : &kRgbwDefaultProfile;
+}
+
+void set_rgbw_colorimetric_dual_edge_policy(
+    RgbwColorimetricDualEdgePolicy policy) FL_NOEXCEPT {
+    fl::Singleton<RgbwColorimetricState>::instance().dual_edge_policy = policy;
+}
+
+RgbwColorimetricDualEdgePolicy get_rgbw_colorimetric_dual_edge_policy() FL_NOEXCEPT {
+    return fl::Singleton<RgbwColorimetricState>::instance().dual_edge_policy;
 }
 
 // Standard primary chromaticities for the named input gamuts (#2710). The

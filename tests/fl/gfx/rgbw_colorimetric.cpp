@@ -214,6 +214,29 @@ FL_TEST_CASE("default profile is reachable via get/set API") {
 }
 
 
+FL_TEST_CASE("dual-edge endpoint policy get/set API") {
+    const RgbwColorimetricDualEdgePolicy original =
+        get_rgbw_colorimetric_dual_edge_policy();
+
+    set_rgbw_colorimetric_dual_edge_policy(
+        RgbwColorimetricDualEdgePolicy::YCorrectClip);
+    FL_CHECK(get_rgbw_colorimetric_dual_edge_policy()
+             == RgbwColorimetricDualEdgePolicy::YCorrectClip);
+
+    set_rgbw_colorimetric_dual_edge_policy(
+        RgbwColorimetricDualEdgePolicy::RolloffAfterClip);
+    FL_CHECK(get_rgbw_colorimetric_dual_edge_policy()
+             == RgbwColorimetricDualEdgePolicy::RolloffAfterClip);
+
+    set_rgbw_colorimetric_dual_edge_policy(
+        RgbwColorimetricDualEdgePolicy::ScaleToFullEndpoint);
+    FL_CHECK(get_rgbw_colorimetric_dual_edge_policy()
+             == RgbwColorimetricDualEdgePolicy::ScaleToFullEndpoint);
+
+    set_rgbw_colorimetric_dual_edge_policy(original);
+}
+
+
 FL_TEST_CASE("default profile has nominal_cct populated") {
     // The default profile must carry a sane nominal CCT so the dispatch can
     // decide whether to shift the W vertex.

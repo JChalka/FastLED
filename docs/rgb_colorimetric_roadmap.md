@@ -104,9 +104,11 @@ MCU-friendly transforms:
   not be silently applied as a pre-solve substitute for source preparation, and
   no gamma, correction, temperature, or power scaling should mutate the solved
   physical tuple after the colorimetric solve.
-- **Endpoint policy scope:** dual-edge unreachable-endpoint policy should be
-  selectable per profile and/or globally. Users should be able to choose whether
-  a profile clips, rolls off, or scales a locked dual-edge endpoint.
+- **Endpoint policy scope:** 3-channel/interior `headroom_fit_scale` should be
+  the strict sub-gamut default because it uses real physical headroom that would
+  otherwise be lost. Dual-edge unreachable-endpoint policy defaults to
+  `y_correct_clip`; `rolloff_after_clip` and `scale_to_full_endpoint` are
+  explicit per-profile and/or global policy choices.
 - **3-channel headroom naming:** call the separate 3-channel/interior physical
   headroom restoration path `headroom_fit_scale` or similar. Do not describe it
   as clipped-channel policy.
@@ -121,33 +123,46 @@ MCU-friendly transforms:
 
 ## Phase 1: RGBW Endpoint Scaling and Endpoint Policy
 
-Status: active. This phase has two separate endpoint concepts that must not be
-conflated: 3-channel physical-headroom scaling and 2-channel unreachable-edge
-policy selection.
+Status: implemented in code, pending verifier/build evidence before closing.
+This phase has two separate endpoint concepts that must not be conflated:
+3-channel physical-headroom scaling and 2-channel unreachable-edge policy
+selection.
 
 Concept split:
 
-- **3-channel / interior `headroom_fit_scale`:** the solved RGBW tuple still has
-  real physical headroom. Example: `h315_s015_v100` can legitimately raise W
-  from the split-energy result toward full source drive while uniformly scaling
-  the participating channels. This restores use of available device headroom;
-  it is not a clipping-policy decision.
+- **3-channel / interior `headroom_fit_scale`:** 3-channel source inputs, i.e.
+  inputs that always produce W participation in strict sub-gamut mode, should
+  scale the solved full endpoint to the available physical headroom implied by
+  the input values. Example: `h315_s015_v100` can legitimately raise W from the
+  split-energy result toward full source drive while uniformly scaling the
+  participating channels. This is the default behavior because all active
+  channels still have real headroom; failing to do it simply throws away device
+  capability. It is not a clipping-policy decision.
 - **2-channel / dual-edge unreachable endpoint policy:** the requested target-Y
   physically cannot be achieved by the locked dual edge without clipping. A
   half-scale yellow-like solve can mathematically land at a clipped/full endpoint
   such as `R≈65535, G≈32768`; from there the implementation must choose a mapping
-  policy: clip, roll off, or scale the full endpoint while preserving
-  chromaticity.
+  policy. The default should be `y_correct_clip`, which tracks the requested Y
+  until the higher channel can no longer be raised without exceeding physical
+  max. `rolloff_after_clip` and `scale_to_full_endpoint` are explicit opt-in
+  choices. Dual-edge policy applies to all solving modes as it is not overdrive or a W-related policy. 
 
 Landed or observed work:
 
-- `src/fl/gfx/rgbw_colorimetric.cpp.hpp` contains a strict-mode endpoint policy
-  guarded by `FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX`.
-- The policy scales the final strict RGBW tuple uniformly when
-  `max(output) < max(input)`, preserving chromaticity and topology while letting
-  the largest output channel track source drive headroom.
-- The policy is continuous across near-full-scale inputs rather than a special
-  case for exactly `65535`.
+- `src/fl/gfx/rgbw_colorimetric.cpp.hpp` contains strict/interior
+  `headroom_fit_scale`, guarded by `FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE`.
+  The legacy `FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX` macro remains
+  a compatibility alias.
+- Locked native dual edges now route through `RgbwColorimetricDualEdgePolicy`,
+  defaulting to `YCorrectClip` with explicit `RolloffAfterClip` and
+  `ScaleToFullEndpoint` modes.
+- Interior `RW`, `GW`, and `BW` boundary lines are checked with a narrow line
+  tolerance before sub-gamut triangle routing.
+- The public/global policy selector is exposed through
+  `set_rgbw_colorimetric_dual_edge_policy`,
+  `get_rgbw_colorimetric_dual_edge_policy`, and `FastLED` wrappers.
+- `tests/fl/gfx/rgbw_colorimetric.cpp` covers the policy get/set API. Direct
+  solver behavior still needs verifier or colorimetric-enabled build evidence.
 
 Remaining work:
 
@@ -155,44 +170,31 @@ Remaining work:
   rows, especially the `h315_s015_v100` style case where W should scale toward
   the source max rather than the extracted split energy. This is the
   3-channel/interior physical-headroom case.
-- Keep 3-channel/interior `headroom_fit_scale` as its own strict-subgamut
-  endpoint restoration path. Do not route it through the dual-edge
-  clipping/rolloff/full endpoint policy selector.
-- Add an explicit dual-edge endpoint luminance policy for locked 2-channel solves
-  that can select:
-  - `y_correct_clip`: preserve the requested target-Y solve until physical
-    clipping, then report/accept the residual.
-  - `rolloff_after_clip`: follow the clipped/Y-correct result near the limit,
-    then apply a smooth knee so post-clip values retain gradation instead of a
-    hard plateau.
-  - `scale_to_full_endpoint`: compatibility/current behavior; solve the
-    chromaticity-preserving endpoint, then scale it by the source/value axis for
-    smoother channel resolution.
 - Confirm topology is preserved after both endpoint mechanisms for native
   singles, native dual edges, and strict interior routes.
-- Apply the dual-edge endpoint-policy contract to direct locked 2-channel solves
-  in RGBW, RGBCCT, and future direct 5+ emitter topologies. For future packages
-  with yellow, violet, or other outer-hull emitters, the policy must distinguish
-  a true anchor solve such as `RGY` or `RBV` from a physically unreachable
-  two-channel fallback.
 - Record endpoint policy metadata in any verifier rows, LUT summaries, and
   pass/fail dictionary keys that compare model output against measurements.
-- Add or update focused regression coverage once code changes are allowed.
+- Add direct solver regression coverage once the test harness can exercise the
+  colorimetric implementation path rather than only public link-safe APIs.
 
 Acceptance criteria:
 
 - Strict RGBW 3-channel/interior outputs use `headroom_fit_scale` or equivalent
-  available-physical-headroom restoration without being governed by the
-  dual-edge clipping policy selector.
-- Locked dual-edge outputs follow the selected endpoint policy, and the
-  compatibility policy preserves the full-endpoint scaling behavior.
+  available-physical-headroom restoration by default without being governed by
+  the dual-edge clipping policy selector.
+- Locked dual-edge outputs default to `y_correct_clip`; rolloff and
+  full-endpoint scaling are explicit policy selections.
 - Neither headroom scaling nor dual-edge clipping/rolloff/full-endpoint mapping
   introduces inactive channels.
 - Existing strict sub-gamut chromaticity/topology behavior remains intact under
   both endpoint mechanisms.
-- Direct dual-edge tests cover clipping, rolloff, and scaled endpoint behavior.
+- Direct dual-edge tests cover Y-correct lower-channel scaling, clipping when the
+  higher channel reaches physical max, rolloff, and scaled endpoint behavior.
 - 3-channel/interior tests cover the `h315_s015_v100`-style physical-headroom
   restoration case separately from dual-edge policy tests.
+- Boundary tests prove cached `RW`, `GW`, and `BW` lines route only on-line
+  targets to the dual-edge path and do not accidentally capture nearby neutral
+  or off-line colors.
 - Verifier output is recorded in the PR or issue thread.
 
 Likely files:
@@ -274,6 +276,17 @@ Add an RGB-only colorimetric solve that uses the same source-space and measured
 emitter-domain model as RGBW, but solves the single physical RGB triangle only.
 There is no W channel, no LP legacy path, and no boosted W-overdrive mode.
 
+This phase has two immediate output targets:
+
+- **RGB device solve:** solve against the physical RGB emitter triangle and emit
+  RGB for ordinary 3-channel strips / SPI devices.
+- **RGB in RGBW package solve:** run the same RGB triangle solve using the RGB
+  emitters in an RGBW package, then route the solved tuple through the RGBW
+  output pipeline with W held at zero. This is useful immediately because the
+  current test bench uses RGBW LEDs: it lets the RGB solver be verified on the
+  same measured package as long as routing preserves the solved RGB tuple and
+  does not invoke white extraction.
+
 Reference algorithm:
 
 ```text
@@ -329,15 +342,32 @@ Acceptance criteria:
 - The solver is expressible as fixed matrix operations plus bounded projection,
   satisfying the discrete-form requirement.
 - The RGB-only path does not pull in RGBW LP, overdrive, or W-specific LUT code.
+- RGB-in-RGBW-package mode routes the solved RGB tuple through RGBW hardware with
+  W = 0, without invoking RGBW strict sub-gamut, LP, overdrive, or white
+  extraction policy.
 
 Likely tests:
 
 - `tests/fl/gfx/rgb_colorimetric.cpp` for solver primitives and dispatch wiring.
+- RGB-in-RGBW-package dispatch rows proving solved RGB reaches RGBW output as
+  `R,G,B,0` after ordering, with no W participation.
 - RGB hull projection rows: inside hull, outside hull, boundary points.
 - Native identity rows: red, green, blue, half-red, half-green, half-blue.
 - Named-gamut rows: Rec.709 / Rec.2020 / DCI-P3 source primaries against a wider
   or narrower measured LED profile.
 - Value-ramp rows around projection and normalization boundaries.
+
+Later exploration: interleaved RGB/RGBW output
+
+Interleaved output is out of scope for the current implementation pass, but it
+is worth preserving as a future research direction once RGB, strict RGBW, and
+RGBWW/RGBCCT modes are stable. Strict sub-gamut RGBW always uses the W diode for
+some regions, and a high-output W diode can create Y granularity gaps at low
+codes: even a low-code W contribution can be tens of nits when the W emitter can
+reach 1500+ nits. A pure RGB solve on the same package may land much lower, for
+example around sub-nit levels, and could potentially fill low-Y granularity gaps
+if a future policy can choose between RGB-only and RGBW strict outputs without
+breaking chromaticity, topology, or metadata separation.
 
 ## Phase 3A: Clarify and Implement RGBCCT Strict vs Overdrive Families
 
@@ -386,6 +416,10 @@ Ambiguous regions:
   overlap ownership, lightweight power/Y efficiency hints, headroom flags, and
   deterministic tie-breaks. More expensive policy diagnostics can live in tests
   or offline verifier tooling, not the per-pixel hot path.
+- Direct inner-boundary lines such as `R+WW`, `G+WW`, `B+WW`, `R+CW`, `G+CW`,
+  and `B+CW` are still 2-channel topologies. They should be cached as narrow
+  boundary lines before triangle routing so they do not accidentally land in an
+  adjacent 3-channel candidate.
 
 Virtual inner-primary candidate:
 
