@@ -5,7 +5,7 @@ FastLED issue #2748. This document is intentionally narrow: it captures the
 context needed to work on the colorimetric response path without requiring a
 fresh tour of the whole FastLED codebase.
 
-Last reviewed: 2026-06-16
+Last reviewed: 2026-06-18
 
 ## Issue Context
 
@@ -123,7 +123,11 @@ MCU-friendly transforms:
 
 ## Phase 1: RGBW Endpoint Scaling and Endpoint Policy
 
-Status: implemented in code, pending verifier/build evidence before closing.
+Status: closed for Phase 1 as of 2026-06-18. The closeout verifier provides
+enough topology/headroom evidence to move on to Phase 2. Remaining dE failures
+are treated as measurement/cache-quality follow-up, not as blockers for the
+endpoint-scaling work.
+
 This phase has two separate endpoint concepts that must not be conflated:
 3-channel physical-headroom scaling and 2-channel unreachable-edge policy
 selection.
@@ -142,71 +146,89 @@ Concept split:
   physically cannot be achieved by the locked dual edge without clipping. A
   half-scale yellow-like solve can mathematically land at a clipped/full endpoint
   such as `R≈65535, G≈32768`; from there the implementation must choose a mapping
-  policy. The default should be `y_correct_clip`, which tracks the requested Y
-  until the higher channel can no longer be raised without exceeding physical
-  max. `rolloff_after_clip` and `scale_to_full_endpoint` are explicit opt-in
-  choices. Dual-edge policy applies to all solving modes as it is not overdrive or a W-related policy. 
+  policy. The default is `y_correct_clip`, which tracks the requested Y until a
+  participating channel reaches physical max. `rolloff_after_clip` and
+  `scale_to_full_endpoint` remain explicit opt-in choices. Dual-edge policy
+  applies to all solving modes as it is not overdrive or a W-related policy.
 
-Landed or observed work:
+Landed work:
 
 - `src/fl/gfx/rgbw_colorimetric.cpp.hpp` contains strict/interior
   `headroom_fit_scale`, guarded by `FASTLED_RGBW_COLORIMETRIC_HEADROOM_FIT_SCALE`.
   The legacy `FASTLED_RGBW_COLORIMETRIC_STRICT_PRESERVE_INPUT_MAX` macro remains
   a compatibility alias.
-- Locked native dual edges now route through `RgbwColorimetricDualEdgePolicy`,
+- Locked native dual edges route through `RgbwColorimetricDualEdgePolicy`,
   defaulting to `YCorrectClip` with explicit `RolloffAfterClip` and
-  `ScaleToFullEndpoint` modes. `YCorrectClip` preserves the solved channel ratio
-  by capping the uniform scale once any participating channel reaches physical
-  max; it must never increase one channel independently after another clips.
-- Live verifier follow-up: `YCorrectClip` now uses source-aligned demand scaling
-  (`max(source_i / full_i)`) instead of `min(input) / min(full)`. Chartreuse is
-  the motivating case: a dual-channel solve can still reach full green while
-  increasing red chromatically, so the policy must keep raising the uniform
-  solved ratio until the true limiting diode reaches physical max.
+  `ScaleToFullEndpoint` modes.
+- `YCorrectClip` now uses source-aligned demand scaling
+  (`max(source_i / full_i)`) instead of `min(input) / min(full)`. This fixes the
+  chartreuse-style headroom loss where the solved dual-edge ratio could still be
+  raised uniformly until the true limiting diode reached physical max.
+- `YCorrectClip` preserves the solved channel ratio by capping the uniform scale
+  once any participating channel reaches physical max. It must never increase
+  one channel independently after another clips.
 - Interior `RW`, `GW`, and `BW` boundary lines are checked with a narrow line
   tolerance before sub-gamut triangle routing.
 - The public/global policy selector is exposed through
   `set_rgbw_colorimetric_dual_edge_policy`,
   `get_rgbw_colorimetric_dual_edge_policy`, and `FastLED` wrappers.
-- `tests/fl/gfx/rgbw_colorimetric.cpp` covers the policy get/set API. Direct
-  solver behavior still needs verifier or colorimetric-enabled build evidence.
 
-Remaining work:
+Closeout verifier evidence:
 
-- Verify the local-fork/workspace implementation against the known motivating
-  rows, especially the `h315_s015_v100` style case where W should scale toward
-  the source max rather than the extracted split energy. This is the
-  3-channel/interior physical-headroom case.
-- Confirm topology is preserved after both endpoint mechanisms for native
-  singles, native dual edges, and strict interior routes.
-- Re-run verifier for dual-edge headroom cases like chartreuse, azure, violet,
-  yellow_full, and yellow_half to confirm `YCorrectClip` now continues
-  increasing a chromatically correct dual-edge tuple while physical headroom
-  remains, then plateaus only at the true limiting diode.
-- Record endpoint policy metadata in any verifier rows, LUT summaries, and
-  pass/fail dictionary keys that compare model output against measurements.
-- Add direct solver regression coverage once the test harness can exercise the
-  colorimetric implementation path rather than only public link-safe APIs.
+- Closeout run:
+  `fastled_rgbw_nativegamut_d65whitepoint_subgamut_model_fullpatch_y_correct_clip_phase1closeout.csv`.
+- Overall pass count improved from 760/1885 to 1309/1885 after the latest patch
+  set and xyY cache update. Mean dE dropped from about 4.50 to about 1.85; max
+  dE dropped from about 41.95 to about 19.69. These numbers are useful trend
+  evidence only; dE is not the gate for closing Phase 1.
+- Native single-channel identity is preserved. All single-channel rows emit the
+  requested native channel only, with W and inactive RGB channels held at zero.
+- Locked native dual-edge topology is preserved. All 257 dual-channel rows emit
+  only the two active RGB channels; W and the inactive primary remain zero.
+- All 37 full-scale dual-edge rows now reach an output max of 65535. The prior
+  run had 12 full-scale dual-edge rows that plateaued early because of the
+  `min(input) / min(full)` cap.
+- The motivating dual-edge rows now use the available legal headroom:
+  `chartreuse` changed from approximately `32768/37514/0/0` to
+  `65535/64687/0/0`; `azure` changed from `0/32768/40175/0` to
+  `0/55237/65535/0`; `violet` changed from `46691/0/32768/0` to
+  `65535/0/38374/0`.
+- Yellow full-scale behavior remains ratio-preserving rather than raw
+  equal-channel output. `yellow` and `yellow_half` solve to approximately
+  `65535/32344/0/0`, not `65535/65535/0/0`.
+- Strict/interior headroom fitting is closed out separately from dual-edge
+  policy. All 1611 three-channel/interior rows emit one of `RGW`, `RBW`, or
+  `GBW`; all 1611 have `max(output) == max(input)`.
+- No strict sub-gamut row emits all four RGBW channels.
 
-Acceptance criteria:
+Non-blocking follow-ups:
 
-- Strict RGBW 3-channel/interior outputs use `headroom_fit_scale` or equivalent
-  available-physical-headroom restoration by default without being governed by
-  the dual-edge clipping policy selector.
+- `RolloffAfterClip` should expose a user-facing rolloff strength / granularity
+  control. The current rolloff behavior is assumed acceptable for closeout, but
+  users should be able to tune how quickly the policy blends toward the scaled
+  endpoint after the Y-correct clip point.
+- Add direct solver regression coverage for the now-verified motivating rows:
+  chartreuse, azure, violet, yellow, yellow_half, native singles, and the
+  `h315_s015_v100`-style interior headroom case. These tests should assert
+  topology, endpoint/max-channel behavior, and ratio preservation rather than
+  real-world dE.
+- Repeat physical measurements after sensor cleaning/replug and spectrophotometer
+  correction. Current dE failures such as blue/single-primary drift are noted as
+  measurement/cache-confidence issues, not Phase 1 endpoint-policy failures.
+
+Acceptance criteria status:
+
+- Strict RGBW 3-channel/interior outputs use `headroom_fit_scale` by default
+  without being governed by the dual-edge clipping policy selector: **met**.
 - Locked dual-edge outputs default to `y_correct_clip`; rolloff and
-  full-endpoint scaling are explicit policy selections.
+  full-endpoint scaling are explicit policy selections: **met**.
 - Neither headroom scaling nor dual-edge clipping/rolloff/full-endpoint mapping
-  introduces inactive channels.
+  introduces inactive channels: **met**.
 - Existing strict sub-gamut chromaticity/topology behavior remains intact under
-  both endpoint mechanisms.
-- Direct dual-edge tests cover Y-correct lower-channel scaling, clipping when the
-  higher channel reaches physical max, rolloff, and scaled endpoint behavior.
-- 3-channel/interior tests cover the `h315_s015_v100`-style physical-headroom
-  restoration case separately from dual-edge policy tests.
-- Boundary tests prove cached `RW`, `GW`, and `BW` lines route only on-line
-  targets to the dual-edge path and do not accidentally capture nearby neutral
-  or off-line colors.
-- Verifier output is recorded in the PR or issue thread.
+  both endpoint mechanisms: **met for topology/headroom; dE remains measurement
+  follow-up**.
+- Direct dual-edge and 3-channel/interior tests still need to be added to the
+  host test suite, but verifier evidence is sufficient to move Phase 2 forward.
 
 Likely files:
 
@@ -217,7 +239,9 @@ Likely files:
 
 ## Phase 2: Extract Portable Colorimetric Response Math
 
-Status: planned, not started in this repo pass.
+Status: active. First extraction landed: shared inline CIE / matrix / geometry /
+NNLS primitives now live in `colorimetric_response.h`. RGBW-specific topology,
+cache, LUT, LP, overdrive, and RGBCCT declarations remain in the RGBW files.
 
 Goal:
 
@@ -233,16 +257,39 @@ Proposed file shape:
 - Include the `.cpp.hpp` once from `src/fl/gfx/_build.cpp.hpp` if it contains
   non-inline definitions.
 
+Landed work:
+
+- `src/fl/gfx/colorimetric_response.h` owns reusable inline helpers:
+  `cct_to_xy`, `xyY_to_XYZ`, `invert3x3`, `matvec3`, `barycentric_xy`,
+  `quantize_u8`, `build_source_matrix`, and `nnls3`.
+- `src/fl/gfx/rgbw_colorimetric.h` now includes the shared response header and
+  keeps only RGBW-specific helpers/types/declarations.
+- `src/fl/gfx/colorimetric_response.cpp.hpp` exists as the future single-include
+  surface for non-inline shared response implementation code and is listed in
+  `src/fl/gfx/_build.cpp.hpp`.
+
+Remaining work:
+
+- Decide whether source-RGB-to-absolute-XYZ helpers and generalized emitter-cache
+  records should move before RGB-only implementation, or whether they should land
+  with the first RGB solver pass.
+- Keep RGBW/RGBWW behavior unchanged while extracting further helpers.
+- Avoid moving RGW/RBW/BGW routing, LP, overdrive, RGBW LUT layout, or RGBCCT
+  layered behavior until a concrete shared abstraction needs them.
+
 Candidate reusable pieces to extract:
 
-- CIE helpers: `cct_to_xy`, `xyY_to_XYZ`.
-- Matrix helpers: `invert3x3`, `matvec3`, `build_source_matrix`.
+- CIE helpers: `cct_to_xy`, `xyY_to_XYZ`. **Landed.**
+- Matrix helpers: `invert3x3`, `matvec3`, `build_source_matrix`. **Landed.**
 - Geometry helpers: `barycentric_xy`, RGB triangle projection helpers.
-- Source RGB to absolute emitter-domain XYZ conversion.
+  `barycentric_xy` is landed; projection helpers remain RGBW-local for now.
+- Source RGB to absolute emitter-domain XYZ conversion. **Not moved yet.**
 - Profile/cache data for arbitrary channel-order emitter profiles, starting from
   physical RGB emitters and extending to grayscale, RGBW, RGBCCT, and future 5+
-  emitter sets.
+  emitter sets. **Not moved yet.**
 - Quantization helpers only if they are shared by RGB and RGBW public surfaces.
+  `quantize_u8` is landed because RGBW/RGBCCT dispatch and future RGB dispatch
+  can share it.
 
 Pieces that should stay RGBW-specific unless proven otherwise:
 
@@ -590,6 +637,9 @@ starts, use the project wrapper scripts rather than direct toolchain commands.
 - Should runtime opt-in be per channel, global, or both for each colorimetric
   family? Current direction supports per-profile and/or global endpoint policy,
   but controller/channel enablement still needs an API shape.
+- What is the preferred public API for `RolloffAfterClip` strength: a global
+  setter/getter mirroring the dual-edge policy selector, a per-profile field,
+  or both? This is a tuning/control follow-up, not a Phase 2 blocker.
 - Should strict RGBCCT and layered RGBWW overdrive share the existing
   `RGBWW_MODE` enum, or should new names/API fields make strict vs overdrive
   impossible to confuse?

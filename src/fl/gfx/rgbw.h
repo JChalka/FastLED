@@ -83,13 +83,18 @@ enum class InputGamut : u8 {
 };
 
 // Endpoint policy for locked 2-channel colorimetric solves. This is separate
-// from strict/interior headroom fitting: dual edges can request target Y values
-// the two physical emitters cannot produce without clipping, so the profile or
-// global policy must choose how to map that unreachable endpoint.
+// from strict/interior headroom fitting: dual edges solve a measured two-emitter
+// ratio and then choose how source demand maps onto that ratio.
 enum class RgbwColorimetricDualEdgePolicy : u8 {
-    YCorrectClip = 0,       // Default: track Y until a channel physically clips.
-    RolloffAfterClip = 1,   // Smoothly compress after the Y-correct clip point.
-    ScaleToFullEndpoint = 2 // Explicit opt-in: scale normalized full endpoint.
+    // Default. Use source-aligned demand scaling and preserve the solved ratio
+    // until any participating diode reaches full physical drive, then plateau.
+    YCorrectClip = 0,
+    // Smoothly blend after the Y-correct clip point to retain gradation in the
+    // clipped region. The current implementation uses a fixed knee.
+    RolloffAfterClip = 1,
+    // Explicit opt-in. Normalize the full solved endpoint and scale by source
+    // value; smoother code progression, but lower-Y inputs shift upward.
+    ScaleToFullEndpoint = 2
 };
 
 // Reconfigure `profile`'s input_xy_r/g/b/w to one of the named gamuts.

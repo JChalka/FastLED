@@ -332,6 +332,11 @@ static void apply_dual_edge_y_correct_clip(const float full[4],
         zero4(uncapped_out);
     }
     constexpr float kEps = 1e-9f;
+    // `full` is the unconstrained full-chroma dual-edge solve.  For asymmetric
+    // source values (chartreuse, azure, violet, etc.) the requested drive scale
+    // is not min(source).  Use the largest per-channel source/full demand, then
+    // cap that *uniform* scale at the first physical channel limit so xy is
+    // preserved all the way to the plateau.
     float max_full = 0.0f;
     float desired_scale = 0.0f;
     for (int i = 0; i < n; ++i) {
@@ -364,6 +369,9 @@ static void apply_dual_edge_scaled_endpoint(const float full[4],
                                             int n,
                                             float value,
                                             float out[4]) FL_NOEXCEPT {
+    // Compatibility / visual-smoothness policy: normalize the endpoint first,
+    // then apply the source value.  This intentionally differs from YCorrectClip
+    // because it can move lower source codes upward in physical Y.
     float endpoint[4] = { full[0], full[1], full[2], full[3] };
     normalize4_if_needed(endpoint);
     zero4(out);
@@ -379,6 +387,9 @@ static void apply_dual_edge_policy(const float full[4],
                                    float value,
                                    const float source[4],
                                    float out[4]) FL_NOEXCEPT {
+    // Dispatch the two-emitter endpoint policy.  `full` is intentionally the
+    // unnormalized full-chroma solve; YCorrectClip needs the real solved ratio
+    // to decide where physical headroom ends.
     const RgbwColorimetricDualEdgePolicy policy =
         get_rgbw_colorimetric_dual_edge_policy();
     if (policy == RgbwColorimetricDualEdgePolicy::ScaleToFullEndpoint) {
@@ -561,6 +572,9 @@ static bool solve_native_dual_edge_fixed_topology(const ProfileCache& cache,
 
 static bool point_on_segment_xy(const float p[2], const float a[2],
                                 const float b[2]) FL_NOEXCEPT {
+    // Strict boundary classifier for RW/GW/BW-like lines.  The tolerance is
+    // intentionally tiny so nearby neutral/off-line colors still route through
+    // a triangle solve instead of being pulled onto a dual-edge topology.
     constexpr float kLineEps = 2.0e-6f;
     const float abx = b[0] - a[0];
     const float aby = b[1] - a[1];
@@ -582,6 +596,9 @@ static bool solve_inner_boundary_line(const ProfileCache& cache,
                                       const float xy_t[2],
                                       const float X_t[3],
                                       float out_rgbw[4]) FL_NOEXCEPT {
+    // Check whether an interior target lies exactly on an outer-primary-to-W
+    // line.  Those are legal two-channel topologies (RW/GW/BW) and should not
+    // be claimed by adjacent RGW/RBW/BGW triangles.
     const float* xy[3] = {
         cache.profile->xy_r, cache.profile->xy_g, cache.profile->xy_b,
     };
