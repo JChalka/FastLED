@@ -235,9 +235,9 @@ inline float compute_eta_from_input(const colorimetric_detail::RgbcctProfile& pr
         // Three xyY_to_XYZ calls per pixel — degraded but still cheap, and
         // only reached when the user explicitly opts out of source space.
         float P_R[3], P_G[3], P_B[3];
-        colorimetric_detail::xyY_to_XYZ(wp.xy_r[0], wp.xy_r[1], wp.lum_r, P_R);
-        colorimetric_detail::xyY_to_XYZ(wp.xy_g[0], wp.xy_g[1], wp.lum_g, P_G);
-        colorimetric_detail::xyY_to_XYZ(wp.xy_b[0], wp.xy_b[1], wp.lum_b, P_B);
+        fl::colorimetric_response::xyY_to_XYZ(wp.xy_r[0], wp.xy_r[1], wp.lum_r, P_R);
+        fl::colorimetric_response::xyY_to_XYZ(wp.xy_g[0], wp.xy_g[1], wp.lum_g, P_G);
+        fl::colorimetric_response::xyY_to_XYZ(wp.xy_b[0], wp.xy_b[1], wp.lum_b, P_B);
         X = P_R[0]*s_r + P_G[0]*s_g + P_B[0]*s_b;
         Y = P_R[1]*s_r + P_G[1]*s_g + P_B[1]*s_b;
         Z = P_R[2]*s_r + P_G[2]*s_g + P_B[2]*s_b;

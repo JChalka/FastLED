@@ -100,15 +100,15 @@ void build_profile_cache(const DiodeProfile* p, int cct_override,
     colorimetric_response::build_emitter_cache(&rgb_profile, &cache->rgb);
     cache->rgb.profile = nullptr;  // embedded RGBW cache mirrors fields only
 
-    xyY_to_XYZ(p->xy_r[0], p->xy_r[1], p->lum_r, cache->P_R);
-    xyY_to_XYZ(p->xy_g[0], p->xy_g[1], p->lum_g, cache->P_G);
-    xyY_to_XYZ(p->xy_b[0], p->xy_b[1], p->lum_b, cache->P_B);
+    fl::colorimetric_response::xyY_to_XYZ(p->xy_r[0], p->xy_r[1], p->lum_r, cache->P_R);
+    fl::colorimetric_response::xyY_to_XYZ(p->xy_g[0], p->xy_g[1], p->lum_g, cache->P_G);
+    fl::colorimetric_response::xyY_to_XYZ(p->xy_b[0], p->xy_b[1], p->lum_b, cache->P_B);
     cache->xy_w[0] = p->xy_w[0];
     cache->xy_w[1] = p->xy_w[1];
     if (cct_override >= 1500 && cct_override <= 15000) {
         cct_to_xy(cct_override, cache->xy_w);
     }
-    xyY_to_XYZ(cache->xy_w[0], cache->xy_w[1], p->lum_w, cache->P_W);
+    fl::colorimetric_response::xyY_to_XYZ(cache->xy_w[0], cache->xy_w[1], p->lum_w, cache->P_W);
 
     auto pack = [](const float* a, const float* b, const float* c,
                    float out[3][3]) FL_NOEXCEPT {
@@ -166,7 +166,7 @@ void build_profile_cache(const DiodeProfile* p, int cct_override,
         // white instead of an underpowered Y=1 target. Without this scale,
         // native/D65 dual-edge and LP solves cannot match the Python model.
         float X_w[3];
-        xyY_to_XYZ(p->input_xy_w[0], p->input_xy_w[1], 1.0f, X_w);
+        fl::colorimetric_response::xyY_to_XYZ(p->input_xy_w[0], p->input_xy_w[1], 1.0f, X_w);
 
         const float (*invs[3])[3] = {
             cache->P_RGW_inv, cache->P_RBW_inv, cache->P_BGW_inv,
@@ -290,7 +290,7 @@ static bool project_to_hull(const ProfileCache& cache,
     xy_t[1] = best_xyz[1] / s2;
     // Per reference, normalize Y to 1.0 for downstream routing. The full-chroma
     // topology is re-solved from this projected XYZ in the caller.
-    xyY_to_XYZ(xy_t[0], xy_t[1], 1.0f, X_t);
+    fl::colorimetric_response::xyY_to_XYZ(xy_t[0], xy_t[1], 1.0f, X_t);
     return true;
 }
 
@@ -770,7 +770,7 @@ bool solve_strict_subgamut_xy(const ProfileCache& cache,
         return true;
     }
     float X_t[3];
-    xyY_to_XYZ(xy_t[0], xy_t[1], Y_t, X_t);
+    fl::colorimetric_response::xyY_to_XYZ(xy_t[0], xy_t[1], Y_t, X_t);
 
     // Out-of-hull projection (#2708). xy_t arrives directly (this variant is
     // called by the LUT builder), so we must project here before routing.
