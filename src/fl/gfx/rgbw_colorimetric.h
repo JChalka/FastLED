@@ -48,22 +48,22 @@
 namespace fl {
 namespace colorimetric_detail {
 
-using colorimetric_response::EmitterProfile;
-using colorimetric_response::EmitterCache;
-using colorimetric_response::LutInterp;
-using colorimetric_response::barycentric_xy;
-using colorimetric_response::build_source_matrix;
-using colorimetric_response::cct_to_xy;
-using colorimetric_response::hermite_basis;
-using colorimetric_response::invert3x3;
-using colorimetric_response::kLutQ;
-using colorimetric_response::kLutStrideBilinear;
-using colorimetric_response::kLutStrideHermite;
-using colorimetric_response::matvec3;
-using colorimetric_response::nnls3;
-using colorimetric_response::quantize_lut_cell;
-using colorimetric_response::quantize_u8;
-using colorimetric_response::source_rgb_to_XYZ;
+using fl::colorimetric_response::EmitterProfile;
+using fl::colorimetric_response::EmitterCache;
+using fl::colorimetric_response::LutInterp;
+using fl::colorimetric_response::barycentric_xy;
+using fl::colorimetric_response::build_source_matrix;
+using fl::colorimetric_response::cct_to_xy;
+using fl::colorimetric_response::hermite_basis;
+using fl::colorimetric_response::invert3x3;
+using fl::colorimetric_response::kLutQ;
+using fl::colorimetric_response::kLutStrideBilinear;
+using fl::colorimetric_response::kLutStrideHermite;
+using fl::colorimetric_response::matvec3;
+using fl::colorimetric_response::nnls3;
+using fl::colorimetric_response::quantize_lut_cell;
+using fl::colorimetric_response::quantize_u8;
+using fl::colorimetric_response::source_rgb_to_XYZ;
 
 // ===== RGBW-specific helpers/types ==========================================
 // Reusable CIE / matrix / barycentric / NNLS primitives live in
