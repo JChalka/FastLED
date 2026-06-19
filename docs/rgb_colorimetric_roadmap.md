@@ -31,8 +31,9 @@ configuration surface.
 Zackees captured the maintainer-approved colorimetric refactor contract in
 FastLED #3255 and the first extraction PR in #3256. This roadmap should align
 with those decisions while preserving the verified Phase 1 RGBW endpoint work in
-this fork. Do not directly copy the PR implementation; use these as the target
-contract for our next refactor passes.
+this fork. Their implementation can be referenced when useful, especially for
+backend plumbing, but this fork should still land changes in the phase order
+below so verifier coverage remains coherent.
 
 - **No compile gates as the final shape.** The final design drops
   `FASTLED_RGBW_COLORIMETRIC` / RGB-specific gates and relies on tree-shaking:
@@ -165,6 +166,14 @@ MCU-friendly transforms:
   live in `loadAndScaleRGB` so RGB chipsets do not need individual driver edits.
   The solved values should not be changed after colorimetric application.
 
+## Verifier Upkeep
+ 
+ TemporalBFI\examples\RGBW_Analytical_FastLED\RGBW_Analytical_FastLED.ino
+ &
+ TemporalBFI\tools\host_calibration_gui\host_calibration_gui_verifier_diodeprofile_patch.py
+ need to stay consisent with implementations within working repository so testing workbench does not break/
+ continues to expose all useful options that are changeable at runtime
+
 ## Phase 1: RGBW Endpoint Scaling and Endpoint Policy
 
 Status: closed for Phase 1 as of 2026-06-18. The closeout verifier provides
@@ -283,13 +292,12 @@ Likely files:
 
 ## Phase 2: Extract Portable Colorimetric Response Math
 
-Status: active. First extraction landed in this fork, but it must be aligned
-with the #3255/#3256 target shape before Phase 2 is complete. Shared inline CIE /
-matrix / geometry / NNLS primitives now live in `colorimetric_response.h` under
-the transitional `colorimetric_detail` namespace. The target namespace is
-`fl::colorimetric_response` with temporary re-exports back into
-`colorimetric_detail` during migration. RGBW-specific topology, cache, LP,
-overdrive, and RGBCCT declarations remain in the RGBW files.
+Status: closed for Phase 2 as of 2026-06-18. Shared inline CIE / matrix /
+geometry / NNLS / LUT primitive helpers, RGB emitter profile/cache records, and
+source-RGB-to-absolute-XYZ conversion now live in `fl::colorimetric_response`,
+with temporary re-exports back into `fl::colorimetric_detail` during migration.
+RGBW-specific topology, cache, LP, overdrive, LUT table/build/lookup, and RGBCCT
+declarations remain in the RGBW files.
 
 Goal:
 
@@ -309,32 +317,24 @@ Landed work:
 
 - `src/fl/gfx/colorimetric_response.h` currently owns reusable inline helpers:
   `cct_to_xy`, `xyY_to_XYZ`, `invert3x3`, `matvec3`, `barycentric_xy`,
-  `quantize_u8`, `build_source_matrix`, and `nnls3`.
+  `quantize_u8`, `build_source_matrix`, `nnls3`, `hermite_basis`,
+  `quantize_lut_cell`, `kLutQ`, `kLutStrideBilinear`, `kLutStrideHermite`,
+  `LutInterp`, `EmitterProfile`, `EmitterCache`, `build_emitter_cache`,
+  `pack_rgb_columns`, and `source_rgb_to_XYZ`.
 - `src/fl/gfx/rgbw_colorimetric.h` now includes the shared response header and
-  keeps only RGBW-specific helpers/types/declarations.
+  keeps only RGBW-specific helpers/types/declarations, with temporary
+  `colorimetric_detail` re-exports for compatibility.
 - `src/fl/gfx/colorimetric_response.cpp.hpp` exists as the future single-include
   surface for non-inline shared response implementation code and is listed in
   `src/fl/gfx/_build.cpp.hpp`.
+- `tests/fl/gfx/colorimetric_response.cpp` covers the moved helpers independent
+  of RGBW topology.
 
-Remaining work:
+Guardrails for later phases:
 
-- Move the shared helpers into `namespace fl::colorimetric_response` and add a
-  temporary using-declaration bridge in `fl::colorimetric_detail` so existing
-  RGBW callers/tests remain stable until the clean-break config refactor.
-- Move `hermite_basis`, `quantize_lut_cell`, `kLutQ`, `kLutStrideBilinear`,
-  `kLutStrideHermite`, and `LutInterp` into `colorimetric_response` per #3255
-  PR 1. `LutTable`, `build_lut`, and `lookup_lut` remain RGBW-specific.
-- Add an RGB-only `EmitterProfile` struct in `colorimetric_response.h` so Phase 3
-  can add the RGB solver without another structural reshuffle.
-- Add dedicated `tests/fl/gfx/colorimetric_response.cpp` coverage for the moved
-  primitives, independent of RGBW topology. Existing `rgbw_colorimetric` tests
-  should continue to pass through the temporary re-export bridge.
-- Decide whether source-RGB-to-absolute-XYZ helpers and generalized emitter-cache
-  records should move before RGB-only implementation, or whether they should land
-  with the first RGB solver pass.
-- Keep RGBW/RGBWW behavior unchanged while extracting further helpers.
-- Avoid moving RGW/RBW/BGW routing, LP, overdrive, RGBW LUT layout, or RGBCCT
-  layered behavior until a concrete shared abstraction needs them.
+- Keep RGBW/RGBWW behavior unchanged while extracting any further helpers.
+- Avoid moving RGW/RBW/BGW routing, LP, overdrive, RGBW LUT table/build/lookup,
+  or RGBCCT layered behavior until a concrete shared abstraction needs them.
 
 Candidate reusable pieces to extract:
 
@@ -342,13 +342,13 @@ Candidate reusable pieces to extract:
 - Matrix helpers: `invert3x3`, `matvec3`, `build_source_matrix`. **Landed.**
 - Geometry helpers: `barycentric_xy`, RGB triangle projection helpers.
   `barycentric_xy` is landed; projection helpers remain RGBW-local for now.
-- Source RGB to absolute emitter-domain XYZ conversion. **Not moved yet.**
+- Source RGB to absolute emitter-domain XYZ conversion. **Landed.**
 - Profile/cache data for arbitrary channel-order emitter profiles, starting from
   physical RGB emitters and extending to grayscale, RGBW, RGBCCT, and future 5+
-  emitter sets. **Not moved yet.**
+  emitter sets. **Initial RGB `EmitterProfile` / `EmitterCache` landed.**
 - Quantization / LUT helper pieces shared by future RGB/RGBCCT LUT work:
-  `quantize_u8` is landed; `quantize_lut_cell`, `hermite_basis`, `kLutQ`,
-  `kLutStride*`, and `LutInterp` still need to move per #3255/#3256.
+  `quantize_u8`, `quantize_lut_cell`, `hermite_basis`, `kLutQ`, `kLutStride*`,
+  and `LutInterp` are landed.
 
 Pieces that should stay RGBW-specific unless proven otherwise:
 
@@ -372,9 +372,11 @@ Acceptance criteria:
 - The shared layer can build an emitter basis from channel order + per-channel
   xyY data without hardcoding W as a required concept.
 - Shared helpers live in `fl::colorimetric_response`, with temporary
-  `colorimetric_detail` re-exports only until the clean-break refactor.
+  `colorimetric_detail` re-exports only until the clean-break refactor: **met**.
 - `tests/fl/gfx/colorimetric_response.cpp` covers moved helpers independently of
-  RGBW topology.
+  RGBW topology: **met**.
+- Source-RGB-to-absolute-XYZ conversion and initial RGB emitter cache records are
+  in the shared response layer: **met**.
 - No new heap allocation appears in the per-pixel hot path.
 - The split is mechanical enough that Phase 3 can reuse the helpers without
   dragging in RGBW white extraction.
@@ -389,9 +391,72 @@ Likely files:
 - `src/fl/gfx/_build.cpp.hpp`
 - `tests/fl/gfx/rgbw_colorimetric.cpp`
 
-## Phase 3: Implement RGB-Only Colorimetric Solver
+## Phase 3: Colorimetric Config/API Scaffold
 
-Status: planned, blocked on the shared response layer from Phase 2.
+Status: planned. This phase implements the #3255 public-surface and per-strip
+plumbing needed before RGB can be integrated cleanly. The full no-gates / global
+setter removal can be completed after the RGB solver lands, but the type shape
+and stub plumbing should be in place first.
+
+Goal:
+
+Move the current fork away from global singleton colorimetric profile state and
+toward the maintainer-approved per-strip configuration model. This gives the RGB
+solver a real carrier to plug into instead of adding another temporary global.
+
+Scope:
+
+- Add `DiodeProfilePtr = fl::shared_ptr<const DiodeProfile>` and
+  `EmitterProfilePtr = fl::shared_ptr<const colorimetric_response::EmitterProfile>`.
+- Add `ColorimetricMode { DiodeProfilePtr profile; bool boosted = false; }` for
+  RGBW colorimetric output.
+- Add `ColorimetricRgb { EmitterProfilePtr profile; }` for RGB colorimetric
+  output.
+- Start moving `Rgbw` from a bare `RGBW_MODE` field toward a tier-gated
+  `fl::variant<RGBW_MODE, ColorimetricMode>` carrier. Keep compatibility shims
+  only where needed for the current fork until the clean-break pass.
+- Add tier-gated per-controller/profile plumbing using `FL_PLATFORM_HAS_TINY_MEMORY`.
+- Add install-on-setter function-pointer stubs for RGB/RGBW colorimetric apply
+  paths. Full removal of `FASTLED_RGBW_COLORIMETRIC` gates can wait until after
+  RGB and RGB-in-RGBW are working, but no new compile gates should be added.
+
+Files / areas to touch:
+
+- `src/fl/gfx/rgbw.h` — profile pointer aliases, `ColorimetricMode`, `Rgbw`
+  carrier shape, compatibility accessors.
+- `src/fl/gfx/rgbw.cpp.hpp` — transitional global/profile removal plan,
+  install-on-setter hook setup, RGBW dispatch bridge.
+- `src/fl/gfx/colorimetric_response.h` — `EmitterProfile` and any shared profile
+  pointer declarations if they belong in the response layer.
+- `src/fl/channels/options.h` — per-channel/per-strip colorimetric config fields
+  if the carrier belongs in channel settings rather than only `Rgbw`.
+- `src/fl/channels/cled_controller.h` — tier-gated setters/getters for
+  per-strip RGB/RGBW colorimetric profiles.
+- `src/FastLED.h` / `src/FastLED.cpp.hpp` — remove or mark transitional global
+  wrappers, and keep public API aligned with the per-strip carrier.
+- `src/cpixel_ledcontroller.h` and `src/pixel_controller.h` — carry optional RGB
+  colorimetric config into `loadAndScaleRGB` without changing non-opt-in output.
+- `src/fl/chipsets/encoders/pixel_iterator.h` and
+  `src/fl/chipsets/encoders/pixel_iterator_adapters.h` — update type-erased
+  grouped RGB/RGBW iterator paths if they need to carry profile state.
+- `tests/fl/gfx/rgbw_colorimetric.cpp`, `tests/fl/gfx/colorimetric_response.cpp`,
+  and future config tests — prove compatibility and no default-output changes.
+
+Acceptance criteria:
+
+- Non-colorimetric RGB/RGBW output is byte-identical when no profile is installed.
+- Per-strip colorimetric profile lifetime is owned by `fl::shared_ptr<const ...>`.
+- TINY-tier builds add no per-instance colorimetric state and code constructing
+  colorimetric modes is unavailable there.
+- The RGB solver can plug into a per-strip `ColorimetricRgb` carrier without a
+  new global singleton.
+- The current verifier sketch/host GUI can still select all runtime policies and
+  solve modes needed for RGBW verification during the transition.
+
+## Phase 4: Implement RGB-Only Colorimetric Solver
+
+Status: planned, blocked on the Phase 3 config/API scaffold or a deliberate
+minimal stub of that scaffold.
 
 Goal:
 
@@ -423,7 +488,7 @@ solve_rgb_only(source_rgb):
 
     rgb_drive = P_RGB_inv * target_xyz
     clamp tiny negatives to zero
-    normalize if any channel exceeds 1
+    normalize if any channel exceeds one
     return rgb_drive
 ```
 
@@ -441,14 +506,12 @@ Proposed file shape:
 - `src/fl/gfx/rgb_colorimetric.h`
 - `src/fl/gfx/rgb_colorimetric.cpp.hpp`
 
-Possible public/private API shape:
+Public/private API shape:
 
 - Internal solver first, public dispatch later:
-  `fl::colorimetric_response::solve_rgb_colorimetric(...)` or equivalent once
-  Phase 2 namespace alignment is complete.
-- Use the new RGB-only `EmitterProfile` / `EmitterProfilePtr` shape from #3255.
-  RGB consumes a 3-emitter profile and should not require a W field or RGBW
-  profile layout.
+  `fl::colorimetric_response::solve_rgb_colorimetric(...)` or equivalent.
+- Use `EmitterProfile` / `EmitterProfilePtr` from Phase 2/3. RGB consumes a
+  3-emitter profile and should not require a W field or RGBW profile layout.
 - No RGB compile gate in the final design. The RGB solver is installed via the
   runtime setter/function-pointer path and dropped by `--gc-sections` when no
   strip installs a profile.
@@ -494,7 +557,7 @@ example around sub-nit levels, and could potentially fill low-Y granularity gaps
 if a future policy can choose between RGB-only and RGBW strict outputs without
 breaking chromaticity, topology, or metadata separation.
 
-## Phase 3A: Clarify and Implement RGBCCT Strict vs Overdrive Families
+## Phase 4A: Clarify and Implement RGBCCT Strict vs Overdrive Families
 
 Status: planned. The current RGBWW implementation should be treated as an
 explicit layered/overdrive family, not as the final strict RGBCCT sub-gamut
@@ -541,6 +604,17 @@ Ambiguous regions:
   overlap ownership, lightweight power/Y efficiency hints, headroom flags, and
   deterministic tie-breaks. More expensive policy diagnostics can live in tests
   or offline verifier tooling, not the per-pixel hot path.
+- Selected policy representation: precompute a warm/cool split boundary for the
+  ambiguous region. Conceptually, this is the locus where the target is equally
+  distant from the warm-W and cool-W inner anchors, traced from the relevant
+  center/inner region out toward the hull. At runtime, the target is classified
+  against this cached boundary to choose the warm-side or cool-side strict
+  candidate set.
+- Boundary storage should be configurable as a direct line or a small multi-point
+  curve. Even a 3-point boundary curve is memory-light and more expressive than
+  a single line, while still avoiding a per-pixel policy search.
+- Tie-break policy becomes simple and user-facing: prefer warm diode or prefer
+  cool diode when the target lies exactly on the cached split boundary.
 - Direct inner-boundary lines such as `R+WW`, `G+WW`, `B+WW`, `R+CW`, `G+CW`,
   and `B+CW` are still 2-channel topologies. They should be cached as narrow
   boundary lines before triangle routing so they do not accidentally land in an
@@ -564,6 +638,9 @@ Proposed naming direction:
 - `strict_rgbcct_subgamut`: direct legal RGBCCT topology solve, one candidate at
   a time.
 - `rgbcct_layered_overdrive`: current warm-path/cool-path solve plus eta blend.
+  This is likely what #3255's `ColorimetricMode::boosted` bool points toward,
+  but `boosted` is not descriptive enough for multiple overdrive families, so
+  this roadmap keeps explicit model-family names.
 - `rgbcct_virtual_inner_overdrive`: cached virtual inner-anchor solve; lower
   runtime cost than fully dynamic overdrive, but still not strict sub-gamut.
 
@@ -574,7 +651,7 @@ Acceptance criteria:
 - A strict RGBCCT mode exists that selects one legal direct candidate per solve.
 - Ambiguous strict regions use deterministic branch policy with no per-pixel
   unconstrained optimizer.
-- Ambiguous-region decisions are cached or precomputed when practical, keeping
+- Ambiguous-region decisions use a cached warm/cool split boundary, keeping
   runtime branch count comparable to the RGBW strict solve path.
 - Virtual inner-primary mode, if implemented, is opt-in and not the default.
 - Verifier/correction metadata records `model_family`, `active_channel_family`,
@@ -590,79 +667,31 @@ Likely files:
 - `tests/fl/gfx/rgbww.cpp`
 - `tests/fl/gfx/rgbw_colorimetric.cpp`
 
-## Phase 4: Find and Wire RGB Implementation Points
-
-Status: decision clarified by #3255. RGB integrates at the post-policy /
-pre-emit boundary inside `loadAndScaleRGB`; remaining work is implementation and
-coverage, not choosing the conceptual insertion point.
-
-Known RGB pipeline facts:
-
-- `CLEDController::show` and `showColor` call `getAdjustmentData`, then construct
-  a `PixelController` in `src/cpixel_ledcontroller.h`.
-- `PixelController` stores raw CRGB data, dither state, and `ColorAdjustment`.
-- RGBW/RGBWW paths are grouped per pixel in `loadAndScaleRGBW` and
-  `loadAndScaleRGBWW`.
-- Plain RGB drivers commonly call `loadAndScale0`, `loadAndScale1`, and
-  `loadAndScale2` separately. Some newer/type-erased paths call grouped
-  `loadAndScaleRGB` through `PixelIterator`.
-- Because a colorimetric RGB solve needs all three source channels at once,
-  inserting it only into one scalar `loadAndScale*()` method is unsafe.
-- Maintainer decision: RGB colorimetric consumes the grouped output of
-  `loadAndScaleRGB`, i.e. after existing correction, temperature, brightness,
-  and gamma/power policy have produced FastLED's normal output RGB. The solve
-  then runs before driver-specific byte ordering / chipset emit. Once solved,
-  the driver serializes the tuple without further per-channel mutation.
-
-Chosen integration path:
-
-- Add tier-gated `fl::optional<ColorimetricRgb> mRgbColorimetric` to the
-  per-controller path.
-- Carry the optional profile into `PixelController` / `loadAndScaleRGB`.
-- In `loadAndScaleRGB`, load the normal premixed RGB bytes first, then call the
-  installed RGB solver function pointer when a profile is present and the
-  function pointer is non-null.
-- No individual RGB chipset driver edits should be necessary if they use grouped
-  `loadAndScaleRGB`. Any remaining scalar-only direct driver paths need to be
-  audited or migrated to the grouped loader.
-
-Phase 4 decision criteria:
-
-- The chosen path must preserve existing output timing for non-opt-in sketches.
-- The opt-in path must not require every chipset driver to be edited at once.
-- The transform must run after `loadAndScale{0,1,2}` / premixed policy output and
-  before driver serialization.
-- It must be clear whether RGB colorimetric applies per controller, per channel,
-  globally, or some combination of those.
-- The final API is per-strip/per-controller, not global. It must coexist with
-  current `setCorrection`, `setTemperature`, `setRgbw`, and `setRgbww` behavior.
-- The integration should be driver-independent: solve the `CRGB` values once,
-  then hand solved RGB bytes/fractions to the normal driver-specific output path.
-
-Likely files to inspect or modify during Phase 4:
-
-- `src/fl/channels/options.h`
-- `src/fl/channels/cled_controller.h`
-- `src/FastLED.h`
-- `src/FastLED.cpp.hpp`
-- `src/cpixel_ledcontroller.h`
-- `src/pixel_controller.h`
-- `src/fl/chipsets/encoders/pixel_iterator.h`
-- `src/fl/chipsets/encoders/pixel_iterator_adapters.h`
-- Representative direct drivers that call scalar `loadAndScale*()`.
-
-Acceptance criteria:
-
-- Existing plain RGB output is byte-for-byte unchanged when the feature is off.
-- Opt-in RGB colorimetric output is reachable through the chosen public API.
-- RGB colorimetric solver output matches a synthetic chipset test byte-for-byte:
-  `loadAndScaleRGB` with brightness/correction/temperature/gamma policy feeds
-  the solver, and no post-solve per-channel scaling occurs.
-- At least one host/stub capture path proves the transform reaches encoded RGB
-  bytes, not just standalone solver output.
-- The remaining direct-driver coverage gap, if any, is documented before merge.
-
 ## Verification Plan for Future Code Passes
+
+### TemporalBFI Verifier Alignment
+
+The hardware verification loop lives outside this FastLED repo, but it must stay
+aligned with any runtime policy, profile, or solver-mode changes made here. Use
+these shorthand paths instead of crawling the workspace:
+
+- `TemporalBFI/examples/RGBW_Analytical_FastLED/RGBW_Analytical_FastLED.ino`
+- `TemporalBFI/tools/host_calibration_gui/host_calibration_gui_verifier_diodeprofile_patch.py`
+
+Keep those files aligned when FastLED changes any of the following:
+
+- Runtime policy knobs such as `RgbwColorimetricDualEdgePolicy`, rolloff
+  parameters, overdrive family selection, or future strict/virtual RGBCCT policy.
+- Solver mode identifiers or public enum/variant shapes that the sketch/GUI must
+  request or echo in verifier output.
+- Diode/emitter profile shape, ownership, or transport. The verifier already
+  needs to request diode/emitter profiles; a future pass should allow setting
+  profile xyY from the GUI at runtime for tuning without rebuild + flash cycles.
+- Target gamut / transfer controls and any expected-xy projection behavior.
+
+When a FastLED change needs verifier support, update the sketch and GUI in the
+same implementation pass or explicitly mark verification as blocked until those
+two files are updated.
 
 Do not run these automatically during planning-only passes. When implementation
 starts, use the project wrapper scripts rather than direct toolchain commands.
@@ -681,12 +710,9 @@ starts, use the project wrapper scripts rather than direct toolchain commands.
 
 ## Remaining Open Questions
 
-- What is the preferred public API for `RolloffAfterClip` strength: a global
-  setter/getter mirroring the dual-edge policy selector, a per-profile field,
-  or both? This is a tuning/control follow-up, not a Phase 2 blocker.
+- `RolloffAfterClip` strength should align to the selected display/profile. The
+  final API likely belongs on profile/config data rather than only a global
+  setter, but exact field naming and defaults remain a tuning/control follow-up.
 - Should strict RGBCCT and layered RGBWW overdrive share the existing
   `RGBWW_MODE` enum, or should new names/API fields make strict vs overdrive
   impossible to confuse?
-- What is the exact lightweight cached policy representation for ambiguous
-  RGBCCT regions: precomputed triangle priority, compact region table, cached
-  branch order, or profile-provided priority?

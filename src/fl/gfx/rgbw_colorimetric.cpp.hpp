@@ -85,6 +85,21 @@ namespace colorimetric_detail {
 void build_profile_cache(const DiodeProfile* p, int cct_override,
                          ProfileCache* cache) FL_NOEXCEPT {
     cache->profile = p;
+
+    EmitterProfile rgb_profile;
+    rgb_profile.xy_r[0] = p->xy_r[0]; rgb_profile.xy_r[1] = p->xy_r[1];
+    rgb_profile.xy_g[0] = p->xy_g[0]; rgb_profile.xy_g[1] = p->xy_g[1];
+    rgb_profile.xy_b[0] = p->xy_b[0]; rgb_profile.xy_b[1] = p->xy_b[1];
+    rgb_profile.lum_r = p->lum_r;
+    rgb_profile.lum_g = p->lum_g;
+    rgb_profile.lum_b = p->lum_b;
+    rgb_profile.input_xy_r[0] = p->input_xy_r[0]; rgb_profile.input_xy_r[1] = p->input_xy_r[1];
+    rgb_profile.input_xy_g[0] = p->input_xy_g[0]; rgb_profile.input_xy_g[1] = p->input_xy_g[1];
+    rgb_profile.input_xy_b[0] = p->input_xy_b[0]; rgb_profile.input_xy_b[1] = p->input_xy_b[1];
+    rgb_profile.input_xy_w[0] = p->input_xy_w[0]; rgb_profile.input_xy_w[1] = p->input_xy_w[1];
+    colorimetric_response::build_emitter_cache(&rgb_profile, &cache->rgb);
+    cache->rgb.profile = nullptr;  // embedded RGBW cache mirrors fields only
+
     xyY_to_XYZ(p->xy_r[0], p->xy_r[1], p->lum_r, cache->P_R);
     xyY_to_XYZ(p->xy_g[0], p->xy_g[1], p->lum_g, cache->P_G);
     xyY_to_XYZ(p->xy_b[0], p->xy_b[1], p->lum_b, cache->P_B);
@@ -191,6 +206,19 @@ void build_profile_cache(const DiodeProfile* p, int cct_override,
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 3; ++j) cache->M_src[i][j] = 0.0f;
     }
+
+    // Keep the shared RGB cache numerically identical to the RGBW cache after
+    // the RGBW-specific absolute-Y scaling step above.
+    for (int i = 0; i < 3; ++i) {
+        cache->rgb.P_R[i] = cache->P_R[i];
+        cache->rgb.P_G[i] = cache->P_G[i];
+        cache->rgb.P_B[i] = cache->P_B[i];
+        for (int j = 0; j < 3; ++j) {
+            cache->rgb.P_RGB_inv[i][j] = cache->P_RGB_inv[i][j];
+            cache->rgb.M_src[i][j] = cache->M_src[i][j];
+        }
+    }
+    cache->rgb.has_source_space = cache->has_source_space;
 }
 
 // Project an out-of-hull target XYZ onto the achievable LED gamut (#2708,
@@ -431,24 +459,10 @@ static const float* column_for_idx(const ProfileCache& cache, int idx) FL_NOEXCE
     }
 }
 
-// Convert linear source RGB into measured-device absolute XYZ.
-//
-// In normal operation this uses cache.M_src, which has already been scaled into
-// the measured emitter domain by build_profile_cache().  The fallback is for
-// legacy / partially initialized profiles where input_xy_* is not populated:
-// then the caller's RGB values are interpreted as direct measured RGB emitter
-// drive fractions.
 static void source_rgb_to_XYZ(const ProfileCache& cache, float s_r,
                               float s_g, float s_b,
                               float X_t[3]) FL_NOEXCEPT {
-    if (cache.has_source_space) {
-        const float s[3] = { s_r, s_g, s_b };
-        matvec3(cache.M_src, s, X_t);
-    } else {
-        X_t[0] = cache.P_R[0] * s_r + cache.P_G[0] * s_g + cache.P_B[0] * s_b;
-        X_t[1] = cache.P_R[1] * s_r + cache.P_G[1] * s_g + cache.P_B[1] * s_b;
-        X_t[2] = cache.P_R[2] * s_r + cache.P_G[2] * s_g + cache.P_B[2] * s_b;
-    }
+    colorimetric_response::source_rgb_to_XYZ(cache.rgb, s_r, s_g, s_b, X_t);
 }
 
 // Native single-axis authority.  For true native input primaries, a pure

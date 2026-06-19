@@ -14,7 +14,41 @@
 #include "fl/stl/stdint.h"
 
 namespace fl {
-namespace colorimetric_detail {
+namespace colorimetric_response {
+
+// RGB-only measured emitter profile.  This is the W-free counterpart to the
+// existing RGBW DiodeProfile and is intentionally small: measured RGB emitter
+// xy/Y plus the input/source RGB color space used to build source->XYZ targets.
+struct EmitterProfile {
+    // Emitter channels are logical R/G/B primaries, not wire byte order.
+    // FastLED already knows strip byte order from addLeds<..., RGB_ORDER>().
+    // The profile records measured response only; output ordering remains the
+    // responsibility of the existing controller/encoder path.
+    float xy_r[2];
+    float xy_g[2];
+    float xy_b[2];
+    float lum_r;
+    float lum_g;
+    float lum_b;
+    float input_xy_r[2];
+    float input_xy_g[2];
+    float input_xy_b[2];
+    float input_xy_w[2];
+};
+
+// Topology-neutral cache for a measured RGB emitter basis. RGBW/RGBCCT solvers
+// can embed this for their outer RGB hull, while the RGB-only solver can use it
+// directly. The cache keeps source-space and measured-emitter-space matrices in
+// one place so converting source RGB to absolute XYZ is shared across models.
+struct EmitterCache {
+    const EmitterProfile* profile = nullptr;
+    float P_R[3] = {0.0f, 0.0f, 0.0f};
+    float P_G[3] = {0.0f, 0.0f, 0.0f};
+    float P_B[3] = {0.0f, 0.0f, 0.0f};
+    float P_RGB_inv[3][3] = {{0.0f}};
+    float M_src[3][3] = {{0.0f}};
+    bool has_source_space = false;
+};
 
 // Krystek's approximation for blackbody chromaticity (good 1000K - 15000K).
 // Krystek's outputs are (u, v) in the CIE 1960 UCS; convert to xy via the
@@ -183,5 +217,90 @@ inline void nnls3(const float M[3][3], const float b[3],
     t_out[0] = t[0]; t_out[1] = t[1]; t_out[2] = t[2];
 }
 
-} // namespace colorimetric_detail
+inline void pack_rgb_columns(const float P_R[3], const float P_G[3],
+                             const float P_B[3], float out[3][3]) FL_NOEXCEPT {
+    out[0][0] = P_R[0]; out[0][1] = P_G[0]; out[0][2] = P_B[0];
+    out[1][0] = P_R[1]; out[1][1] = P_G[1]; out[1][2] = P_B[1];
+    out[2][0] = P_R[2]; out[2][1] = P_G[2]; out[2][2] = P_B[2];
+}
+
+// Build a topology-neutral RGB emitter cache from a measured profile. If the
+// source-space white is unset (input_xy_w.y == 0), source RGB is treated as
+// direct emitter drive fractions for backward-compatible native/device use.
+inline bool build_emitter_cache(const EmitterProfile* p,
+                                EmitterCache* cache) FL_NOEXCEPT {
+    if (p == nullptr || cache == nullptr) {
+        return false;
+    }
+    cache->profile = p;
+    xyY_to_XYZ(p->xy_r[0], p->xy_r[1], p->lum_r, cache->P_R);
+    xyY_to_XYZ(p->xy_g[0], p->xy_g[1], p->lum_g, cache->P_G);
+    xyY_to_XYZ(p->xy_b[0], p->xy_b[1], p->lum_b, cache->P_B);
+
+    float P_RGB[3][3];
+    pack_rgb_columns(cache->P_R, cache->P_G, cache->P_B, P_RGB);
+    const bool ok_rgb = invert3x3(P_RGB, cache->P_RGB_inv);
+
+    cache->has_source_space = (p->input_xy_w[1] > 1e-6f) &&
+        build_source_matrix(p->input_xy_r, p->input_xy_g, p->input_xy_b,
+                            p->input_xy_w, cache->M_src);
+    if (!cache->has_source_space) {
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                cache->M_src[i][j] = 0.0f;
+            }
+        }
+    }
+    return ok_rgb;
+}
+
+// Convert linear source RGB into the measured-device absolute XYZ domain.
+// With a populated source matrix, this maps from a named/input gamut into the
+// emitter domain. Without one, it falls back to direct device-emitter drive.
+inline void source_rgb_to_XYZ(const EmitterCache& cache, float s_r,
+                              float s_g, float s_b,
+                              float X_t[3]) FL_NOEXCEPT {
+    if (cache.has_source_space) {
+        const float s[3] = {s_r, s_g, s_b};
+        matvec3(cache.M_src, s, X_t);
+    } else {
+        X_t[0] = cache.P_R[0] * s_r + cache.P_G[0] * s_g + cache.P_B[0] * s_b;
+        X_t[1] = cache.P_R[1] * s_r + cache.P_G[1] * s_g + cache.P_B[1] * s_b;
+        X_t[2] = cache.P_R[2] * s_r + cache.P_G[2] * s_g + cache.P_B[2] * s_b;
+    }
+}
+
+// ===== LUT quantization and interpolation primitives ========================
+// Shared by the current RGBW LUT path and any future RGB/RGBCCT LUT work. The
+// LUT table/container itself stays RGBW-specific until another topology needs it.
+
+constexpr i16 kLutQ = 4096;
+constexpr int kLutStrideBilinear = 4;
+constexpr int kLutStrideHermite = 12;
+
+enum class LutInterp : u8 {
+    Bilinear = 0,
+    Hermite = 1,
+};
+
+// Cubic Hermite basis on [0, 1]. Output layout:
+//   h00, h01: value weights at t=0 and t=1
+//   h10, h11: derivative weights at t=0 and t=1
+inline void hermite_basis(float t, float out[4]) FL_NOEXCEPT {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    out[0] = 2.0f * t3 - 3.0f * t2 + 1.0f;
+    out[1] = -2.0f * t3 + 3.0f * t2;
+    out[2] = t3 - 2.0f * t2 + t;
+    out[3] = t3 - t2;
+}
+
+inline i16 quantize_lut_cell(float v) FL_NOEXCEPT {
+    const float scaled = v * static_cast<float>(kLutQ) + 0.5f;
+    if (scaled <= -32768.0f) return -32768;
+    if (scaled >= 32767.0f) return 32767;
+    return static_cast<i16>(scaled);
+}
+
+} // namespace colorimetric_response
 } // namespace fl

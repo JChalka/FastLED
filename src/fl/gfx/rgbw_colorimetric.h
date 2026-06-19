@@ -48,6 +48,23 @@
 namespace fl {
 namespace colorimetric_detail {
 
+using colorimetric_response::EmitterProfile;
+using colorimetric_response::EmitterCache;
+using colorimetric_response::LutInterp;
+using colorimetric_response::barycentric_xy;
+using colorimetric_response::build_source_matrix;
+using colorimetric_response::cct_to_xy;
+using colorimetric_response::hermite_basis;
+using colorimetric_response::invert3x3;
+using colorimetric_response::kLutQ;
+using colorimetric_response::kLutStrideBilinear;
+using colorimetric_response::kLutStrideHermite;
+using colorimetric_response::matvec3;
+using colorimetric_response::nnls3;
+using colorimetric_response::quantize_lut_cell;
+using colorimetric_response::quantize_u8;
+using colorimetric_response::source_rgb_to_XYZ;
+
 // ===== RGBW-specific helpers/types ==========================================
 // Reusable CIE / matrix / barycentric / NNLS primitives live in
 // fl/gfx/colorimetric_response.h. This header keeps RGBW-specific topology,
@@ -116,6 +133,7 @@ inline int count_active_channels(float s_r, float s_g, float s_b) FL_NOEXCEPT {
 // raw xy_w) or they will choose the wrong sub-gamut for CCT-shifted whites.
 struct ProfileCache {
     const DiodeProfile* profile;
+    EmitterCache rgb;                         // shared outer RGB emitter cache
     float xy_w[2];                           // effective W chromaticity (incl. CCT shift)
     float P_R[3], P_G[3], P_B[3], P_W[3];   // emitter XYZ at full drive
     float P_RGB_inv[3][3];                   // [R G B]^-1, used by wx_lp_legacy
@@ -144,40 +162,6 @@ struct ProfileCache {
     bool has_source_space;
 };
 
-// LUT cell quantization scale (value in [-8, +8) maps to i16 via *kLutQ).
-constexpr i16 kLutQ = 4096;
-
-// Storage stride per grid point. Bilinear LUTs store 4 (rgbw) values; Hermite
-// LUTs additionally store ∂/∂t_x and ∂/∂t_y per channel (in cell-parameter
-// units), enabling bicubic Hermite interpolation that reaches comparable
-// accuracy at ~half the grid edge length — ~25 % of the memory at ~ the
-// same error vs. bilinear. The grid step is uniform so derivatives are
-// naturally expressed in cell-parameter units (t ∈ [0, 1] per cell).
-constexpr int kLutStrideBilinear = 4;
-constexpr int kLutStrideHermite = 12;
-
-enum class LutInterp : u8 {
-    Bilinear = 0,
-    Hermite = 1,
-};
-
-// Cubic Hermite basis on [0, 1]. Output layout: { h00, h01, h10, h11 } where
-//   h00(t) = 2t³ - 3t² + 1   value at t=0
-//   h01(t) = -2t³ + 3t²      value at t=1
-//   h10(t) = t³ - 2t² + t    derivative at t=0
-//   h11(t) = t³ - t²         derivative at t=1
-// Lifted into a header inline so `lookup_lut` and the test suite consume
-// exactly the same evaluator (CodeRabbit #2707: tests that redefine basis
-// locally cannot catch regressions in the production code).
-inline void hermite_basis(float t, float out[4]) FL_NOEXCEPT {
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    out[0] = 2.0f * t3 - 3.0f * t2 + 1.0f;
-    out[1] = -2.0f * t3 + 3.0f * t2;
-    out[2] = t3 - 2.0f * t2 + t;
-    out[3] = t3 - t2;
-}
-
 // Owns its cell storage via fl::unique_ptr. Obtain via `build_lut(...)`,
 // which atomically allocates + populates. Lookup code can rely on
 // .cells.get() being non-null for the table's lifetime.
@@ -194,13 +178,6 @@ struct RgbcctProfile {
     DiodeProfile warm_path;  // R, G, B, W=warm — typical xy_w ≈ 3000K
     DiodeProfile cool_path;  // R, G, B, W=cool — typical xy_w ≈ 6500K
 };
-
-inline i16 quantize_lut_cell(float v) FL_NOEXCEPT {
-    const float scaled = v * static_cast<float>(kLutQ) + 0.5f;
-    if (scaled <= -32768.0f) return -32768;
-    if (scaled >= 32767.0f) return 32767;
-    return static_cast<i16>(scaled);
-}
 
 // Convenience: derive eta from a target CCT relative to the warm/cool
 // reference CCTs. Linear interpolation in CCT space, clamped to [0, 1].
